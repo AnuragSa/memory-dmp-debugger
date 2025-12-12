@@ -28,7 +28,9 @@ Report Writer Agent (Generate actionable findings)
 ## Prerequisites
 
 - Python 3.11+
-- WinDbg or CDB (Windows Debugging Tools)
+- Windows Debugging Tools (CDB required; WinDbg optional)
+  - CDB (`cdb.exe`) runs all commands, including data model (`dx`)
+  - WinDbg (`windbg.exe`) can be used if you prefer, but is not required
 - OpenAI API key or Anthropic API key
 
 ## Installation

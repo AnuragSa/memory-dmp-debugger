@@ -31,6 +31,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             model=settings.openai_model,
             temperature=temperature,
             api_key=settings.openai_api_key,
+            request_timeout=60,  # 60 second timeout
         )
     
     elif provider == "anthropic":
@@ -41,6 +42,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             model=settings.anthropic_model,
             temperature=temperature,
             api_key=settings.anthropic_api_key,
+            timeout=60,  # 60 second timeout
         )
     
     elif provider == "azure":
@@ -56,6 +58,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             azure_endpoint=settings.azure_openai_endpoint,
             api_key=settings.azure_openai_api_key,
             temperature=temperature,
+            request_timeout=60,  # 60 second timeout
         )
     
     else:

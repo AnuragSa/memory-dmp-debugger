@@ -67,6 +67,14 @@ class Settings(BaseSettings):
         default=120,
         description="Timeout for debugger commands in seconds"
     )
+    enable_data_model_commands: bool = Field(
+        default=True,
+        description="Whether to allow data model (dx) commands"
+    )
+    max_command_retries: int = Field(
+        default=3,
+        description="Maximum number of retries for failed commands with syntax errors"
+    )
 
     def get_debugger_path(self, prefer_cdb: bool = True) -> Path:
         """Get the debugger executable path."""

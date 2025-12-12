@@ -22,6 +22,7 @@ class AnalysisState(TypedDict):
     dump_path: str
     issue_description: str
     dump_type: str  # "user" or "kernel"
+    supports_dx: bool  # Whether data model commands are available
     
     # Planning
     investigation_plan: list[str]  # High-level tasks to investigate
@@ -31,17 +32,31 @@ class AnalysisState(TypedDict):
     # Execution history
     commands_executed: list[CommandResult]
     findings: list[str]  # Key findings discovered so far
+    discovered_properties: dict[str, list[str]]  # Track verified object properties
     
     # Agent reasoning (for chain of thought)
     planner_reasoning: str
     debugger_reasoning: str
     analyzer_reasoning: str
     
+    # Analyzer data request (step 2 in sequence)
+    data_request: str  # Specific data the analyzer wants the debugger to collect
+    data_request_reasoning: str  # Why this data is needed
+    
     # Control flow
     iteration: int
     max_iterations: int
     should_continue: bool
     needs_more_investigation: bool
+    task_complete: bool  # Whether current task is complete
+    failed_commands_current_task: int  # Track failed commands for current task to prevent infinite loops
+    analyzer_feedback: str  # Feedback from analyzer to guide next command
+    recent_data_requests: list[str]  # Track recent requests to detect repetitive loops
+    commands_executed_current_task: list[str]  # Track commands per task to detect repetition
+    sos_loaded: bool  # Track if SOS extension is loaded for .NET debugging
+    _sos_load_attempted: bool  # Internal flag to prevent repeated SOS load attempts
+    show_commands: bool  # Whether to display debugger command outputs
+    syntax_errors: list[dict[str, str]]  # Track syntax errors: [{"command": "...", "error": "..."}]
     
     # Final output
     final_report: str | None

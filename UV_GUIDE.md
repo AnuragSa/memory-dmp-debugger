@@ -38,7 +38,7 @@ uv sync --upgrade
 
 ```powershell
 # Run the CLI
-uv run dump-debugger analyze "C:\Users\AnuragSaxena\Downloads\M365Copilot.DMP" --issue "Runtime errors are being reported"
+uv run dump-debugger analyze "C:\Users\AnuragSaxena\Downloads\mem-dumps\dmp2.dmp" --issue "Investigate what issues do you see?"
 
 # Run Python scripts
 uv run python script.py

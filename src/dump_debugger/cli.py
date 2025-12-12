@@ -38,11 +38,18 @@ def cli() -> None:
     is_flag=True,
     help="Interactive mode - pause after each step for user confirmation"
 )
+@click.option(
+    "--show-commands",
+    is_flag=True,
+    default=False,
+    help="Show debugger command outputs (default: hidden)"
+)
 def analyze(
     dump_path: Path,
     issue: str,
     output: Path | None,
-    interactive: bool
+    interactive: bool,
+    show_commands: bool
 ) -> None:
     """Analyze a memory dump file.
     
@@ -54,7 +61,7 @@ def analyze(
             console.print("[yellow]Interactive mode not yet implemented[/yellow]")
         
         # Run the analysis
-        final_state = run_analysis(dump_path, issue)
+        final_state = run_analysis(dump_path, issue, show_commands=show_commands)
         
         # Display results
         console.print("\n" + "━" * 60)
@@ -67,7 +74,7 @@ def analyze(
 **Findings:** {len(final_state.get('findings', []))}
 **Iterations:** {final_state.get('iteration', 0)}
         """
-        console.print(Panel(stats_text.strip(), title="📊 Statistics", border_style="blue"))
+        console.print(Panel(stats_text.strip(), title="Statistics", border_style="blue"))
         
         # Show the report
         report = final_state.get("final_report", "No report generated")
@@ -81,7 +88,7 @@ def analyze(
             console.print("\n")
             console.print(Panel(
                 Markdown(report),
-                title="📝 Analysis Report",
+                title="Analysis Report",
                 border_style="green"
             ))
         
@@ -155,7 +162,7 @@ def setup() -> None:
     env_example = Path(".env.example")
     
     if env_file.exists():
-        if not click.confirm("⚠ .env file already exists. Overwrite?"):
+        if not click.confirm("WARNING: .env file already exists. Overwrite?"):
             console.print("[yellow]Setup cancelled[/yellow]")
             return
     

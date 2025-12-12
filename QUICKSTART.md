@@ -17,6 +17,8 @@ uv sync
 ```powershell
 uv run dump-debugger setup
 ```
+After running the setup command, edit `.env` to add your API key and adjust debugger paths if necessary.
+You can also disable data model commands by setting `ENABLE_DATA_MODEL_COMMANDS=false`.
 
 Then edit `.env` file with your settings:
 - Add your OpenAI API key (or Anthropic/Azure)
