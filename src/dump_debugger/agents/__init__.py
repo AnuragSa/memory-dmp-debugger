@@ -30,6 +30,31 @@ class PlannerAgent:
 
     def __init__(self) -> None:
         self.llm = get_structured_llm(temperature=0.1)
+    
+    def _neutralize_issue_description(self, issue_description: str) -> str:
+        """Convert user's biased description into neutral investigation goal.
+        
+        Args:
+            issue_description: User's description (may contain assumptions)
+            
+        Returns:
+            Neutral investigation goal
+        """
+        issue_lower = issue_description.lower()
+        
+        # Strip assumption words and convert to neutral investigation
+        if 'hang' in issue_lower or 'hung' in issue_lower or 'freeze' in issue_lower:
+            return "Determine the actual state of the application and all threads"
+        elif 'crash' in issue_lower:
+            return "Determine what caused the application to terminate and verify if it was truly a crash"
+        elif 'leak' in issue_lower:
+            return "Analyze memory usage patterns and determine if there are any abnormalities"
+        elif 'slow' in issue_lower or 'performance' in issue_lower:
+            return "Analyze execution patterns and resource usage to determine actual performance characteristics"
+        elif 'deadlock' in issue_lower:
+            return "Analyze thread synchronization and locking to determine actual thread states"
+        else:
+            return "Investigate the application state objectively and determine root cause based on evidence"
 
     def plan(self, state: AnalysisState) -> dict[str, Any]:
         """Create an investigation plan based on the issue description.
@@ -43,14 +68,22 @@ class PlannerAgent:
         console.print("\n[bold cyan]>> Planner Agent[/bold cyan]")
         console.print("[dim]Creating investigation plan...[/dim]")
 
+        # Reframe the issue as a neutral investigation goal
+        neutral_goal = self._neutralize_issue_description(state['issue_description'])
+        
         messages = [
             SystemMessage(content=PLANNER_PROMPT),
-            HumanMessage(content=f"""Create an investigation plan for:
+            HumanMessage(content=f"""Create an OBJECTIVE investigation plan for:
 
 Dump Type: {state['dump_type']}
-Issue Description: {state['issue_description']}
+User's Report: {state['issue_description']}
 
-Provide a structured plan with 4-6 specific investigation tasks.
+⚠️ CRITICAL: The user's report above is just a HYPOTHESIS - it may be WRONG.
+Your job is to investigate OBJECTIVELY and determine what ACTUALLY happened.
+
+Investigation Goal: {neutral_goal}
+
+Provide a structured plan with 4-6 specific investigation tasks that will reveal the TRUE state.
 Return your response as valid JSON matching the schema.""")
         ]
 
@@ -725,16 +758,24 @@ Output valid JSON with data_request, reasoning, and priority fields."""
         
         messages = [
             SystemMessage(content=ANALYZER_AGENT_PROMPT),
-            HumanMessage(content=f"""Analyze this debugger output:
+            HumanMessage(content=f"""Analyze this debugger output OBJECTIVELY:
 
 Current Task: {state['current_task']}
-Issue Description: {state['issue_description']}
+User's Claim: {state['issue_description']}
+
+⚠️ CRITICAL: User's claim may be INCORRECT. Analyze ONLY the data below.
 
 Command: {last_cmd['command']}
 Success: {last_cmd['success']}
 Output: {str(last_cmd.get('parsed', last_cmd.get('output', '')))}
 
 Previous Findings: {state.get('findings', [])}
+
+BEFORE stating your findings, ask yourself these verification questions:
+1. Does the data actually support the user's claim?
+2. What does the data ACTUALLY show, ignoring the claim?
+3. Is there evidence that CONTRADICTS the user's claim?
+4. What alternative explanations fit the data better?
 
 Return your response as valid JSON with: findings, reasoning, needs_more_investigation, suggested_next_steps""")
         ]
@@ -851,8 +892,16 @@ class ReportWriterAgent:
             Context string for report generation
         """
         parts = [
-            f"Issue Description: {state['issue_description']}",
+            f"User's Claim: {state['issue_description']}",
             f"Dump Type: {state['dump_type']}",
+            "",
+            "⚠️ CRITICAL INSTRUCTIONS FOR REPORT:",
+            "1. The 'User's Claim' above may be INCORRECT - do NOT assume it's true",
+            "2. Base your conclusions ONLY on the evidence from debugger output below",
+            "3. If evidence CONTRADICTS the user's claim, state that clearly",
+            "4. If evidence is INSUFFICIENT to support the claim, state that",
+            "5. Challenge your own conclusions - what alternative explanations exist?",
+            "",
             f"\nInvestigation Plan:",
         ]
 
@@ -869,9 +918,16 @@ class ReportWriterAgent:
                     output = output[:500] + "... (truncated)"
                 parts.append(f"Output: {output}")
 
-        parts.append("\nKey Findings:")
+        parts.append("\nKey Findings (from objective analysis):")
         for finding in state.get("findings", []):
             parts.append(f"  - {finding}")
+        
+        parts.append("\n")
+        parts.append("VERIFICATION CHECKLIST before writing report:")
+        parts.append("☐ Does the evidence actually support the user's claim?")
+        parts.append("☐ Are there contradictions between claim and data?")
+        parts.append("☐ What does the data show when ignoring the user's claim?")
+        parts.append("☐ What alternative explanations fit the evidence?")
 
         return "\n".join(parts)
 

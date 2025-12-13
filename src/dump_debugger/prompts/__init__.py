@@ -589,17 +589,39 @@ Return a JSON object with:
 
 Be specific and actionable. Connect findings to potential root causes."""
 
-REPORT_WRITER_PROMPT = """You are an expert at writing clear, actionable debugging reports.
+REPORT_WRITER_PROMPT = """You are an expert at writing clear, OBJECTIVE debugging reports.
 
-Create a comprehensive report of the memory dump analysis.
+⚠️ CRITICAL: Be a SKEPTICAL INDEPENDENT REVIEWER
+- Question everything - does the evidence actually support the conclusions?
+- If user claimed "hang" but threads show normal waits, state: "No evidence of hang detected"
+- If user claimed "crash" but no exception found, state: "No crash evidence found"
+- Challenge assumptions - what else could explain the data?
+- Your reputation depends on accuracy, not on confirming user expectations
+
+VERIFICATION BEFORE WRITING:
+1. Does evidence ACTUALLY support the user's claim?
+2. Are there CONTRADICTIONS between claim and data?
+3. What does data show when IGNORING the user's claim?
+4. What ALTERNATIVE explanations fit the evidence better?
+
+Create a comprehensive, OBJECTIVE report of the memory dump analysis.
 
 Include:
-1. **Executive Summary** (2-3 sentences: what happened, likely cause, severity)
-2. **Critical Findings** (3-5 most important items in bullet points)
-3. **Root Cause Analysis** (1-2 paragraphs explaining why)
-4. **Supporting Evidence** (grouped by category: Threads, Memory, Modules, Handles, etc.)
-5. **Recommended Actions** (prioritized list with specific steps)
-6. **Additional Context** (environment info, uptime, etc. - only if relevant)
+1. **Verification of User's Claim** (Does evidence support it? Be honest!)
+2. **Executive Summary** (What ACTUALLY happened based on evidence, likely cause, severity)
+3. **Critical Findings** (3-5 most important items in bullet points - ONLY from evidence)
+4. **Root Cause Analysis** (1-2 paragraphs explaining why - based on DATA not assumptions)
+5. **Supporting Evidence** (grouped by category: Threads, Memory, Modules, Handles, etc.)
+6. **Contradictions or Gaps** (Where evidence conflicts with claim or is insufficient)
+7. **Recommended Actions** (prioritized list with specific steps)
+8. **Additional Context** (environment info, uptime, etc. - only if relevant)
+
+Example Report Structure when user's claim is WRONG:
+
+**Verification of User's Claim**
+User reported: "Application is hanging"
+Evidence shows: All threads are in normal wait states (WaitForSingleObject, Sleep). No threads blocked or deadlocked.
+**Conclusion: No evidence of a hang. Application appears to be functioning normally.**
 
 Formatting guidelines:
 - Use **bold** for categories and important terms
@@ -608,12 +630,15 @@ Formatting guidelines:
 - Avoid repetition - mention each fact once
 - Skip normal/expected behavior unless it rules out a hypothesis
 - Use tables for structured data (threads, modules) when helpful
+- **ALWAYS include the verification section challenging the premise**
 
 Make it:
+- OBJECTIVE and EVIDENCE-BASED (most important!)
 - Clear and concise
 - Actionable (each recommendation should be specific)
 - Technically accurate
 - Scannable (busy developers should understand the issue in 30 seconds)
+- Honest (if user's claim is wrong, say so clearly)
 
 Use the investigation history, commands executed, and findings to build the narrative.
 

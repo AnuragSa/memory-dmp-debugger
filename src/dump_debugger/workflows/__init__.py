@@ -1,6 +1,8 @@
 """LangGraph workflow definition for memory dump analysis."""
 
+import sys
 from pathlib import Path
+from typing import Optional, TextIO
 
 from langgraph.graph import END, StateGraph
 from rich.console import Console
@@ -16,7 +18,36 @@ from dump_debugger.config import settings
 from dump_debugger.core import DebuggerWrapper
 from dump_debugger.state import AnalysisState
 
+
+class TeeOutput:
+    """File-like object that writes to both stdout and a file."""
+    
+    def __init__(self, original_stdout: TextIO, file_handle: TextIO):
+        self.original_stdout = original_stdout
+        self.file = file_handle
+    
+    def write(self, text: str) -> int:
+        """Write to both stdout and file."""
+        self.original_stdout.write(text)
+        self.original_stdout.flush()
+        self.file.write(text)
+        self.file.flush()
+        return len(text)
+    
+    def flush(self):
+        """Flush both outputs."""
+        self.original_stdout.flush()
+        self.file.flush()
+    
+    def isatty(self):
+        """Check if original stdout is a TTY."""
+        return self.original_stdout.isatty()
+
+
 console = Console()
+_log_file_path: Optional[Path] = None
+_log_file_handle = None
+_original_stdout = None
 
 
 def ask_user_to_continue() -> bool:
@@ -338,3 +369,43 @@ def run_analysis(dump_path: Path, issue_description: str, show_commands: bool = 
     finally:
         # Clean up debugger session
         debugger.close()
+
+
+def enable_console_logging(log_path: Path) -> None:
+    """Enable console output logging to a file.
+    
+    Args:
+        log_path: Path where console output should be saved
+    """
+    global _log_file_path, _log_file_handle, _original_stdout
+    
+    _log_file_path = log_path
+    
+    # Open the log file for writing
+    _log_file_handle = open(log_path, "w", encoding="utf-8")
+    
+    # Save original stdout
+    _original_stdout = sys.stdout
+    
+    # Create tee output that writes to both stdout and file
+    tee = TeeOutput(_original_stdout, _log_file_handle)
+    
+    # Redirect sys.stdout to the tee
+    sys.stdout = tee
+
+
+def finalize_console_logging() -> None:
+    """Finalize console logging and restore original stdout."""
+    global _log_file_handle, _log_file_path, _original_stdout
+    
+    if _log_file_handle is not None:
+        # Restore original stdout
+        if _original_stdout is not None:
+            sys.stdout = _original_stdout
+        
+        # Close the log file
+        _log_file_handle.flush()
+        _log_file_handle.close()
+        _log_file_handle = None
+        _log_file_path = None
+        _original_stdout = None

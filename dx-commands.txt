@@ -1,0 +1,115 @@
+# EXPANDED WINDBG DATA MODEL (DX) COMMAND LIBRARY
+# ==============================================================================
+# MASTER INSTRUCTIONS FOR AGENT:
+# 1. SYNTAX: Always use 'new { Key = Value }' for LINQ projections.
+# 2. SAFETY: Use '.Take(n)' on large collections (Threads, Handles) to prevent timeouts.
+# 3. CONTEXT: Commands starting with @$curprocess require a valid process context.
+# 4. PATHS: Do not invent paths. Use the exact property chains listed below.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# PHASE 1: HIGH-LEVEL TRIAGE & EXCEPTIONS
+# ------------------------------------------------------------------------------
+
+# Intent: Check if this is a crash dump and see the active exception (if any)
+# Context: Critical for "why did it crash?"
+dx @$cursession.Attributes.Where(a => a.Name == "BugCheck")
+
+# Intent: Get the Last Event (often the crash reason)
+dx @$curprocess.LastEvent
+
+# Intent: Identify the thread that caused the crash (if applicable)
+# Syntax Rule: Accessing the 'Triggering' object from the session attributes
+dx @$cursession.Attributes.Where(a => a.Name == "TriggeringThreadId")
+
+# Intent: List all distinct exception types currently found on the heap (Managed/SOS only)
+# Note: Requires .NET extensions (SOS), but useful to attempt if analyzing w3wp
+dx @$cursession.Processes.SelectMany(p => p.Threads).Select(t => t.LastException).Where(e => e != null)
+
+# ------------------------------------------------------------------------------
+# PHASE 2: ADVANCED THREAD FORENSICS
+# ------------------------------------------------------------------------------
+
+# Intent: Find threads consuming the most CPU (Kernel/User Time)
+# Syntax Rule: OrderByDescending to sort results
+dx @$curprocess.Threads.OrderByDescending(t => t.KernelTime + t.UserTime).Select(t => new { Id = t.Id, KTime = t.KernelTime, UTime = t.UserTime })
+
+# Intent: Inspect the TEB (Thread Environment Block) for specific threads
+# Context: Useful for low-level environment checks
+dx @$curprocess.Threads.Select(t => new { Id = t.Id, TebAddress = t.Environment.Block.Bytes })
+
+# Intent: "Who is calling X?" - Find all threads with a specific function in their stack
+# Syntax Rule: Uses .Any() on the stack frames. Replace "WaitForSingleObject" with any function name.
+dx @$curprocess.Threads.Where(t => t.Stack.Frames.Any(f => f.ToDisplayString().Contains("WaitForSingleObject"))).Select(t => t.Id)
+
+# Intent: "Deep Blame" - Get the full stack trace string for a specific thread (e.g., Thread 0)
+# Syntax Rule: Access by index [0] or matching Id
+dx @$curprocess.Threads.First(t => t.Id == 0x0).Stack.Frames.Select(f => f.ToDisplayString())
+
+# Intent: Check Thread Locals (Variables) for the top frame of every thread
+# Warning: Can be verbose. Good for targeted debugging.
+dx @$curprocess.Threads.Select(t => new { Id = t.Id, Locals = t.Stack.Frames.First().LocalVariables })
+
+# ------------------------------------------------------------------------------
+# PHASE 3: MODULES & VERSIONING (COMPATIBILITY)
+# ------------------------------------------------------------------------------
+
+# Intent: Find all modules with "TimeDateStamp" to check for outdated binaries
+# Syntax Rule: Projecting header info requires digging into .Contents.Headers
+dx @$curprocess.Modules.Select(m => new { Name = m.Name, TimeStamp = m.Contents.Headers.FileHeader.TimeDateStamp })
+
+# Intent: Find specific DLLs loaded from unusual paths (Security/Malware check)
+# Syntax Rule: Filtering by string exclusion
+dx @$curprocess.Modules.Where(m => !m.Name.StartsWith("C:\\Windows\\System32")).Select(m => m.Name)
+
+# Intent: Check entry point addresses for modules (Debugging startup issues)
+dx @$curprocess.Modules.Select(m => new { Name = m.Name, EntryPoint = m.Contents.Headers.OptionalHeader.AddressOfEntryPoint })
+
+# Intent: Verify PDB (Symbol) Status for modules
+# Context: Helps agents know if they *can* even debug a specific module
+dx @$curprocess.Modules.Select(m => new { Name = m.Name, HasSymbols = m.Symbols != null })
+
+# ------------------------------------------------------------------------------
+# PHASE 4: RESOURCE USAGE (HANDLES & MEMORY)
+# ------------------------------------------------------------------------------
+
+# Intent: Find the "Top 10" Handle Types (Leak Detection)
+# Syntax Rule: GroupBy -> Select(Count) -> OrderByDescending -> Take(10)
+dx @$curprocess.Io.Handles.GroupBy(h => h.Type).Select(g => new { Type = g.Key, Count = g.Count() }).OrderByDescending(x => x.Count).Take(10)
+
+# Intent: List all open File Handles to specific paths (e.g., Log files, Configs)
+# Syntax Rule: Case-insensitive search is safer with ToLower()
+dx @$curprocess.Io.Handles.Where(h => h.Type == "File" && h.ObjectName.ToLower().Contains(".log")).Select(h => h.ObjectName)
+
+# Intent: Check for "Mutant" or "Semaphore" exhaustion (Concurrency Deadlocks)
+dx @$curprocess.Io.Handles.Where(h => h.Type == "Mutant" || h.Type == "Semaphore").Select(h => new { Handle = h.Handle, Name = h.ObjectName })
+
+# Intent: Get Handle Object Addresses (for passing to !object or !handle commands)
+dx @$curprocess.Io.Handles.Select(h => new { Handle = h.Handle, ObjectBody = h.Object.UnderlyingObject })
+
+# ------------------------------------------------------------------------------
+# PHASE 5: .NET / MANAGED DEBUGGING (IF EXTENSIONS AVAILABLE)
+# ------------------------------------------------------------------------------
+# Note: These commands often require running '.loadby sos clr' first.
+
+# Intent: Dump all strings on the Heap (Duplicate String Analysis)
+# Syntax Rule: Requires SOS data model support
+dx @$curprocess.Threads.First().Stack.Frames.Select(f => f.LocalVariables.Where(v => v.Type.Name == "System.String"))
+
+# Intent: Find all Exceptions on the Heap (Global Exception Search)
+# Note: This is an expensive query!
+dx Debugger.Utility.Collections.FromBits(0).Select(o => o.Exception).Where(e => e != null)
+
+# ------------------------------------------------------------------------------
+# PHASE 6: UTILITY & SEARCH
+# ------------------------------------------------------------------------------
+
+# Intent: Search for a specific function address across all loaded modules
+# Syntax Rule: Helpful when you have a raw address (0x12345678) and want to know "Where is this?"
+dx @$curprocess.Modules.Where(m => 0x7ff995d50000 >= m.BaseAddress && 0x7ff995d50000 < (m.BaseAddress + m.Size))
+
+# Intent: Convert a raw hex value to a symbol (if possible)
+dx Debugger.Utility.Control.ExecuteCommand("ln 0x7ff995d50000")
+
+# Intent: List all environment variables (Config Check)
+dx @$curprocess.Environment.ToDisplayString()

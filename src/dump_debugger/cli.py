@@ -44,19 +44,33 @@ def cli() -> None:
     default=False,
     help="Show debugger command outputs (default: hidden)"
 )
+@click.option(
+    "--log-output",
+    "-l",
+    type=click.Path(path_type=Path),
+    help="Save all console output to log file for later analysis"
+)
 def analyze(
     dump_path: Path,
     issue: str,
     output: Path | None,
     interactive: bool,
-    show_commands: bool
+    show_commands: bool,
+    log_output: Path | None
 ) -> None:
     """Analyze a memory dump file.
     
     Example:
         dump-debugger analyze crash.dmp --issue "Application crashed on startup"
+        dump-debugger analyze crash.dmp --issue "App hanging" --log-output analysis.log
     """
     try:
+        # Setup console logging if requested
+        if log_output:
+            from dump_debugger.workflows import enable_console_logging
+            enable_console_logging(log_output)
+            console.print(f"[dim]Logging console output to: {log_output}[/dim]")
+        
         if interactive:
             console.print("[yellow]Interactive mode not yet implemented[/yellow]")
         
@@ -111,6 +125,12 @@ def analyze(
             import traceback
             console.print("\n[dim]" + traceback.format_exc() + "[/dim]")
         raise click.Abort()
+    finally:
+        # Finalize log if enabled (always runs, even on error)
+        if log_output:
+            from dump_debugger.workflows import finalize_console_logging
+            finalize_console_logging()
+            console.print(f"\n[green]✓[/green] Console output saved to: {log_output}")
 
 
 @cli.command()
