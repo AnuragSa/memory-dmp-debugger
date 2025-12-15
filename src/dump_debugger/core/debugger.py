@@ -121,8 +121,14 @@ class DebuggerWrapper:
             
             # Load symbols on startup
             console.print("[dim]Loading symbols (this may take a minute)...[/dim]")
-            self._send_command(f".symfix+ {self.symbol_path}")
+            # Don't use .symfix+ since we already set symbol path via -y
+            # Just reload symbols with the configured path
             self._send_command(".reload")
+            
+            # Load SOS extension (try both Framework and Core)
+            console.print("[dim]Loading SOS extension...[/dim]")
+            self._send_command(".loadby sos clr")
+            self._send_command(".loadby sos coreclr")
             
             # Wait for symbols to load
             time.sleep(2)
@@ -254,11 +260,17 @@ class DebuggerWrapper:
             while time.time() - start_time < timeout:
                 with self._output_lock:
                     if self._output_buffer:
+                        # Process buffer line by line to find delimiter
+                        new_buffer = []
                         for line in self._output_buffer:
                             if self._command_delimiter in line:
                                 delimiter_found = True
+                                # Don't include the delimiter line or anything after it in this batch
                                 break
                             output_lines.append(line)
+                        
+                        # If we found the delimiter, we can stop processing the buffer
+                        # but we should clear it all since we've consumed what we needed
                         self._output_buffer.clear()
                 
                 if delimiter_found:
@@ -279,6 +291,11 @@ class DebuggerWrapper:
             
             # Check for errors
             error = self._extract_error(output)
+            
+            # Special handling for "not extension gallery command" error
+            if "not extension gallery command" in output:
+                error = "Command not found or extension not loaded"
+                
             success = error is None
             
             # Only truncate extremely large outputs (>500KB) to prevent context overflow
@@ -452,13 +469,16 @@ class DebuggerWrapper:
             r"The operation attempted to access data outside the valid range",
             r"Unable to bind name",
             r"Expected '=' at",  # dx syntax errors
+            r"The call to LoadLibrary\(sos\) failed",
+            r"Failed to load extension sos",
+            r"No export dumpheap found",
+            r"dumpheap is not extension gallery command"
         ]
         
         # Patterns that are just warnings, not errors
         warning_patterns = [
             r"Unable to verify checksum",
             r"Unable to load image",
-            r"No export",
             r"WARNING:",
             r"DBGHELP:",
         ]

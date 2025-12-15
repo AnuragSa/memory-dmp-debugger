@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     # LLM Configuration
     llm_provider: Literal["openai", "anthropic", "azure"] = Field(
         default="openai",
-        description="LLM provider to use"
+        description="LLM provider to use (openai, anthropic, azure for both Azure OpenAI and Azure Claude)"
     )
     
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
@@ -35,12 +35,12 @@ class Settings(BaseSettings):
         description="Anthropic model to use"
     )
     
-    azure_openai_api_key: str | None = Field(default=None, description="Azure OpenAI API key")
-    azure_openai_endpoint: str | None = Field(default=None, description="Azure OpenAI endpoint")
-    azure_openai_deployment: str | None = Field(default=None, description="Azure OpenAI deployment")
+    azure_openai_api_key: str | None = Field(default=None, description="Azure API key (for both OpenAI and Claude)")
+    azure_openai_endpoint: str | None = Field(default=None, description="Azure endpoint (supports both OpenAI and Anthropic formats)")
+    azure_openai_deployment: str | None = Field(default=None, description="Azure deployment name")
     azure_openai_api_version: str = Field(
         default="2024-02-15-preview",
-        description="Azure OpenAI API version"
+        description="Azure API version"
     )
 
     # Debugger Configuration
@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     max_command_retries: int = Field(
         default=3,
         description="Maximum number of retries for failed commands with syntax errors"
+    )
+    max_hypothesis_attempts: int = Field(
+        default=5,
+        description="Maximum number of hypothesis attempts before forcing investigation"
     )
 
     def get_debugger_path(self, prefer_cdb: bool = True) -> Path:

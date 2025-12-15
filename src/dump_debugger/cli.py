@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from dump_debugger.workflows import run_analysis
+from dump_debugger.workflows import run_analysis, enable_logging
 
 console = Console()
 
@@ -67,51 +67,23 @@ def analyze(
     try:
         # Setup console logging if requested
         if log_output:
-            from dump_debugger.workflows import enable_console_logging
-            enable_console_logging(log_output)
-            console.print(f"[dim]Logging console output to: {log_output}[/dim]")
+            enable_logging(log_output)
         
         if interactive:
             console.print("[yellow]Interactive mode not yet implemented[/yellow]")
         
-        # Run the analysis
-        final_state = run_analysis(dump_path, issue, show_commands=show_commands)
+        # Run the hypothesis-driven analysis
+        report = run_analysis(
+            dump_path, 
+            issue, 
+            show_commands=show_commands,
+            log_to_file=(log_output is not None)
+        )
         
-        # Display results
-        console.print("\n" + "━" * 60)
-        console.print("[bold green]Analysis Complete![/bold green]")
-        console.print("━" * 60 + "\n")
-        
-        # Show statistics
-        stats_text = f"""
-**Commands Executed:** {len(final_state.get('commands_executed', []))}
-**Findings:** {len(final_state.get('findings', []))}
-**Iterations:** {final_state.get('iteration', 0)}
-        """
-        console.print(Panel(stats_text.strip(), title="Statistics", border_style="blue"))
-        
-        # Show the report
-        report = final_state.get("final_report", "No report generated")
-        
+        # Save to file if requested
         if output:
-            # Save to file
             output.write_text(report, encoding="utf-8")
             console.print(f"\n[green]✓[/green] Report saved to: {output}")
-        else:
-            # Display in console
-            console.print("\n")
-            console.print(Panel(
-                Markdown(report),
-                title="Analysis Report",
-                border_style="green"
-            ))
-        
-        # Show key findings
-        findings = final_state.get("findings", [])
-        if findings:
-            console.print("\n[bold]Key Findings:[/bold]")
-            for i, finding in enumerate(findings, 1):
-                console.print(f"  {i}. {finding}")
         
     except FileNotFoundError as e:
         console.print(f"[red]Error: {str(e)}[/red]")
@@ -125,12 +97,6 @@ def analyze(
             import traceback
             console.print("\n[dim]" + traceback.format_exc() + "[/dim]")
         raise click.Abort()
-    finally:
-        # Finalize log if enabled (always runs, even on error)
-        if log_output:
-            from dump_debugger.workflows import finalize_console_logging
-            finalize_console_logging()
-            console.print(f"\n[green]✓[/green] Console output saved to: {log_output}")
 
 
 @cli.command()

@@ -5,18 +5,37 @@ from typing import Annotated, Any, Literal, TypedDict
 from langgraph.graph import add_messages
 
 
+class Evidence(TypedDict):
+    """A single piece of evidence collected during investigation."""
+    command: str  # Command that generated this evidence
+    output: str  # Raw command output
+    finding: str  # What was discovered
+    significance: str  # Why it matters
+    confidence: str  # "high", "medium", or "low"
+
+
+class HypothesisTest(TypedDict):
+    """A hypothesis and its test results."""
+    hypothesis: str  # The hypothesis being tested
+    test_commands: list[str]  # Commands to test the hypothesis
+    expected_confirmed: str  # What would confirm it
+    expected_rejected: str  # What would reject it
+    result: Literal["confirmed", "rejected", "inconclusive"] | None
+    evidence: list[Evidence]  # Evidence from testing
+    evaluation_reasoning: str  # Why we reached the result
+    inconclusive_count: int  # How many times this test was inconclusive
+
+
 class CommandResult(TypedDict):
     """Result from executing a debugger command."""
     command: str
     output: str
-    parsed: Any
     success: bool
     error: str | None
-    reasoning: str  # Why this command was chosen
 
 
 class AnalysisState(TypedDict):
-    """State that flows through the LangGraph workflow."""
+    """State for hypothesis-driven workflow: Hypothesis → Test → Investigate → Reason → Report."""
     
     # Input
     dump_path: str
@@ -24,65 +43,57 @@ class AnalysisState(TypedDict):
     dump_type: str  # "user" or "kernel"
     supports_dx: bool  # Whether data model commands are available
     
-    # Planning
-    investigation_plan: list[str]  # High-level tasks to investigate
-    current_task: str  # Current task being worked on
-    current_task_index: int
+    # Hypothesis phase (NEW - expert-level thinking)
+    current_hypothesis: str  # Current hypothesis being tested
+    hypothesis_confidence: str  # "high", "medium", "low"
+    hypothesis_reasoning: str  # Why we think this is the cause
+    hypothesis_tests: list[HypothesisTest]  # All hypothesis tests conducted
+    alternative_hypotheses: list[str]  # Backup hypotheses if main one rejected
+    hypothesis_status: str  # "testing", "confirmed", "rejected"
     
-    # Execution history
-    commands_executed: list[CommandResult]
-    findings: list[str]  # Key findings discovered so far
-    discovered_properties: dict[str, list[str]]  # Track verified object properties
-    
-    # Agent reasoning (for chain of thought)
+    # Planning phase (after hypothesis confirmed)
+    investigation_plan: list[str]  # List of tasks to investigate (3-5 tasks)
     planner_reasoning: str
-    debugger_reasoning: str
-    analyzer_reasoning: str
     
-    # Analyzer data request (step 2 in sequence)
-    data_request: str  # Specific data the analyzer wants the debugger to collect
-    data_request_reasoning: str  # Why this data is needed
+    # Investigation phase (per task)
+    current_task: str  # Currently investigating task
+    current_task_index: int
+    evidence_inventory: dict[str, list[Evidence]]  # Task → List of evidence found
     
-    # Control flow
+    # Execution tracking
+    commands_executed: list[str]  # All commands run (for reference)
     iteration: int
     max_iterations: int
-    should_continue: bool
-    needs_more_investigation: bool
-    task_complete: bool  # Whether current task is complete
-    failed_commands_current_task: int  # Track failed commands for current task to prevent infinite loops
-    analyzer_feedback: str  # Feedback from analyzer to guide next command
-    recent_data_requests: list[str]  # Track recent requests to detect repetitive loops
-    commands_executed_current_task: list[str]  # Track commands per task to detect repetition
-    sos_loaded: bool  # Track if SOS extension is loaded for .NET debugging
-    _sos_load_attempted: bool  # Internal flag to prevent repeated SOS load attempts
-    show_commands: bool  # Whether to display debugger command outputs
-    syntax_errors: list[dict[str, str]]  # Track syntax errors: [{"command": "...", "error": "..."}]
+    
+    # Reasoning phase
+    reasoner_analysis: str  # Holistic analysis across all evidence
+    conclusions: list[str]  # Key conclusions drawn
+    confidence_level: Literal["high", "medium", "low"] | None
     
     # Final output
     final_report: str | None
-    confidence_level: Literal["high", "medium", "low"] | None
     
-    # Messages for LLM conversation (using LangGraph's add_messages reducer)
-    messages: Annotated[list[dict[str, Any]], add_messages]
+    # Utility flags
+    sos_loaded: bool
+    show_commands: bool
+    should_continue: bool
 
 
 class PlannerOutput(TypedDict):
     """Output from the planner agent."""
     investigation_plan: list[str]
     reasoning: str
-    estimated_complexity: Literal["simple", "moderate", "complex"]
 
 
-class DebuggerOutput(TypedDict):
-    """Output from the debugger agent."""
-    command: str
+class InvestigatorOutput(TypedDict):
+    """Output from investigator agent after completing a task."""
+    evidence_found: list[Evidence]
+    task_complete: bool
     reasoning: str
-    expected_insights: str  # What we expect to learn from this command
 
 
-class AnalyzerOutput(TypedDict):
-    """Output from the analyzer agent."""
-    findings: list[str]
-    reasoning: str
-    needs_more_investigation: bool
-    suggested_next_steps: list[str] | None
+class ReasonerOutput(TypedDict):
+    """Output from reasoner agent analyzing all evidence."""
+    analysis: str
+    conclusions: list[str]
+    confidence_level: Literal["high", "medium", "low"]

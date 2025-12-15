@@ -38,7 +38,7 @@ uv sync --upgrade
 
 ```powershell
 # Run the CLI
-uv run dump-debugger analyze "C:\Users\AnuragSaxena\Downloads\mem-dumps\dmp2.dmp" --issue "Investigate what issues do you see?"
+uv run dump-debugger analyze "C:\Users\AnuragSaxena\Downloads\mem-dumps\dmp2.dmp" --issue "Investigate what issues do you see?" --show-commands
 
 # Run Python scripts
 uv run python script.py

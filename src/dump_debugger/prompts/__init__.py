@@ -130,6 +130,9 @@ Command: dx @$curprocess.Modules.Where(m => m.Name.Contains("clr")).First()
 Task: Group threads by their wait reason
 Command: dx @$curprocess.Threads.GroupBy(t => t.Stack.Frames.First().ToDisplayString())
 
+Task: Analyze heap statistics
+Command: !dumpheap -stat
+
 === OUTPUT FORMAT ===
 
 Return ONLY the raw dx command. No markdown, no explanations.
@@ -156,68 +159,26 @@ When dx commands fail, use these fallbacks:
 
 BUT: Always try dx commands first unless explicitly warned about that specific command.
 
-CRITICAL - INSPECT PARENT OBJECTS BEFORE ACCESSING NESTED PROPERTIES:
+=== SAFE PROPERTIES (CAN USE WITHOUT INSPECTION) ===
 
-RULE: You MUST inspect the parent object FIRST before accessing ANY nested property.
-NEVER assume @$curprocess.SyncObjects, @$curprocess.Handles, etc. exist!
+You can safely assume these properties exist on standard objects:
+- Threads: Id, Stack, Name, Type
+- Modules: Name, BaseAddress, Size
+- Stack: Frames
 
-WHAT ACTUALLY EXISTS IN @$curprocess (USER-MODE DUMPS):
-These are the ONLY common properties available in user-mode minidumps:
-- @$curprocess.Threads          ✓ Usually available
-- @$curprocess.Modules          ✓ Usually available  
-- @$curprocess.Id               ✓ Usually available
-- @$curprocess.Name             ✓ Usually available
-- @$curprocess.Environment      ✓ Sometimes available (use !peb fallback)
+You do NOT need to inspect these specific properties before using them.
+However, for other properties (like SyncObjects, Handles), you MUST still inspect first.
 
-These typically DO NOT EXIST in user-mode dumps:
-- @$curprocess.SyncObjects      ✗ Does not exist
-- @$curprocess.Handles          ✗ Does not exist (use !handle instead)
-- @$curprocess.Io               ✗ Does not exist
-- @$curprocess.Memory           ✗ Does not exist (use !address -summary)
-- @$curprocess.Locks            ✗ Does not exist
+=== LINQ TEMPLATES ===
 
-⚠️ COMMON MISTAKES TO AVOID:
-- Accessing @$curprocess.SyncObjects without first checking if it exists
-- Assuming t.State exists (doesn't exist on Threads in user-mode)
-- Assuming t.WaitReason exists (doesn't exist in user-mode)
-- Accessing nested properties without inspecting parent first
+- Filter stack by function name:
+  .Where(t => t.Stack.Frames.Any(f => f.ToDisplayString().Contains("Sql")))
 
-MANDATORY INSPECT-PARENT-FIRST WORKFLOW:
+- Filter by thread ID:
+  .Where(t => t.Id == 0x1234)
 
-Step 1 - INSPECT PARENT (no -r1, see what collections exist):
-- dx @$curprocess                                     # See what's available at top level
-  Look for: Threads, Modules, Environment, Id, Name
-  
-Step 2 - Only access properties you see in Step 1:
-- If you see "Threads" → dx @$curprocess.Threads.Count()
-- If you DON'T see "SyncObjects" → DON'T try dx @$curprocess.SyncObjects!
-
-Step 3 - INSPECT nested object before accessing ITS properties:
-- dx -r1 @$curprocess.Threads.First()                 # See what properties a Thread has
-- Only use properties shown in this output
-
-Step 4 - USE only properties you confirmed exist:
-- If inspection shows "Id", "Stack" → you can use those
-- If inspection doesn't show "State" → DON'T use it!
-
-EXAMPLE WORKFLOW:
-```
-BAD - Assuming nested property exists:
-  dx @$curprocess.SyncObjects                       # ✗ FAILS - never checked if SyncObjects exists!
-
-GOOD - Inspect parent first:
-1. dx @$curprocess                                  # Check what's available
-   Output shows: Threads, Modules, Id, Name (no SyncObjects!)
-   
-2. dx @$curprocess.Threads.Count()                  # ✓ Use Threads (it exists)
-   
-3. dx -r1 @$curprocess.Threads.First()              # ✓ Inspect what properties Thread has
-   Output shows: Id, Stack, Environment (no State!)
-   
-4. dx @$curprocess.Threads.Select(t => t.Id)        # ✓ Use Id (confirmed it exists)
-
-5. dx @$curprocess.Threads.Select(t => t.State)     # ✗ WRONG - State doesn't exist
-```
+- Filter modules by name:
+  .Where(m => m.Name.Contains("System"))
 
 FILTERED QUERIES (after inspecting):
 
@@ -301,7 +262,7 @@ WHEN TO USE .NET COMMANDS:
 - For thread analysis in .NET: !threads > dx @$curprocess.Threads
 
 NEVER:
-- Assume properties exist without inspecting
+- Assume properties exist without inspecting (EXCEPT SAFE PROPERTIES)
 - Use properties that failed in previous commands
 - Dump entire collections without filtering
 
@@ -351,7 +312,7 @@ IMPORTANT:
 - ALWAYS inspect PARENT object first: dx @$curprocess (see what collections exist)
 - NEVER access @$curprocess.SyncObjects, @$curprocess.Handles, etc. without confirming they exist
 - THEN inspect nested objects: dx -r1 @$curprocess.Threads.First()
-- Use ONLY properties you confirmed exist through inspection
+- Use ONLY properties you confirmed exist through inspection (OR SAFE PROPERTIES)
 - Base your command on previous outputs
 - If a property fails, it doesn't exist - don't retry it
 - Explain your reasoning clearly
@@ -367,14 +328,16 @@ VALIDATION RULES:
    - If command uses @$curprocess.SyncObjects, check if SyncObjects exists
    - If not verified, REJECT and suggest inspection command
 
-2. VERIFY PROPERTY ACCESS:
-   - If command uses t.State, check if State property exists on Thread objects
-   - If not verified, REJECT and suggest: dx -r1 @$curprocess.Threads.First()
+2. ALLOW STANDARD PROPERTIES:
+   - The following properties are ALWAYS allowed without inspection:
+     * Threads: Id, Stack, Name, Type
+     * Modules: Name, BaseAddress, Size
+     * Stack: Frames
+   - Do NOT reject commands using these properties even if not in discovered list.
 
-3. CHECK DISCOVERED PROPERTIES:
-   - You will be given a list of discovered properties from previous inspections
-   - ONLY approve commands that use verified properties
-   - If property not in discovered list, suggest inspection first
+3. CHECK DISCOVERED PROPERTIES (FOR NON-STANDARD):
+   - For properties NOT listed above, check against discovered list.
+   - If property not in discovered list, suggest inspection first.
 
 4. VALIDATE SYNTAX:
    - Check for proper LINQ syntax
@@ -398,7 +361,7 @@ DECISION PROCESS:
 
 1. Parse the proposed command
 2. Extract all object property accesses (e.g., t.State)
-3. Check if each property is in discovered_properties
+3. Check if each property is in discovered_properties OR is a STANDARD property
 4. If ALL properties verified → APPROVE
 5. If ANY property unverified → REJECT + suggest inspection command
 
@@ -427,13 +390,13 @@ Output:
 }
 
 Proposed: dx @$curprocess.Threads.Select(t => t.Id)
-Discovered properties: {"Threads[0]": ["Id", "Stack", "Environment"]}
-Decision: APPROVE - Id is in discovered properties
+Discovered properties: {}
+Decision: APPROVE - Id is a standard property
 Output:
 {
     "approved": true,
     "command": "dx @$curprocess.Threads.Select(t => t.Id)",
-    "reasoning": "Id property verified to exist in Threads[0] inspection",
+    "reasoning": "Id is a standard property and is always allowed.",
     "needs_inspection": null,
     "suggested_inspection": null
 }
@@ -450,7 +413,7 @@ Output:
     "suggested_inspection": null
 }
 
-Be strict - only approve commands that use verified properties!"""
+Be strict - only approve commands that use verified or standard properties!"""
 
 ANALYZER_AGENT_PROMPT = """You are an expert at interpreting WinDbg output and driving OBJECTIVE investigation.
 
@@ -475,6 +438,19 @@ Your role in the ANALYZE phase is to:
 3. Determine if the task is complete or if more SPECIFIC data is needed
 4. Provide clear feedback on what additional data is required (be specific!)
 5. NEVER force findings to match user assumptions - report what data actually shows
+
+=== SPECIFIC FILTERING STRATEGIES ===
+
+Map high-level issues to low-level queries:
+- "DB connections" -> Find threads with 'Sql' or 'Connection' in stack
+- "High memory" -> !dumpheap -stat
+- "Blocked threads" -> Look for WaitOne, EnterCriticalSection in stacks
+
+=== STRATEGY SHIFT ===
+
+If thread analysis yields nothing (no suspicious stacks), request heap statistics:
+- "Threads look normal. Requesting heap analysis."
+- Command: !dumpheap -stat
 
 CRITICAL - AVOID INFINITE LOOPS:
 - If you've seen similar commands executed 2-3 times without new insights, ACCEPT WHAT YOU HAVE and move on
