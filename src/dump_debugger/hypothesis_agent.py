@@ -87,7 +87,7 @@ class HypothesisDrivenAgent:
 
 USER QUESTION: {issue}
 DUMP TYPE: {dump_type}
-DATA MODEL AVAILABLE: {"Yes - prefer dx commands for efficient, concise output" if supports_dx else "No - use traditional commands"}
+DATA MODEL AVAILABLE: {"Yes, but use sparingly" if supports_dx else "No"}
 {pattern_context}
 {command_suggestion}
 
@@ -97,7 +97,6 @@ Think like an expert:
 - What's the most likely root cause?
 - What pattern does this match (deadlock, leak, starvation, etc.)?
 - What would you check first to confirm or reject this hypothesis?
-{"- For user-mode dumps, PREFER data model (dx) commands - they return concise, structured data" if supports_dx else ""}
 
 Return a JSON object with:
 {{
@@ -110,9 +109,12 @@ Return a JSON object with:
     "alternative_hypotheses": ["Alternative explanation 1", "Alternative explanation 2"]
 }}
 
-Use WinDbg/SOS commands appropriate for {dump_type}-mode dumps.
-{"Prefer 'dx' commands where possible for concise output." if supports_dx else "Use traditional SOS/WinDbg commands."}
-Be specific with commands - use actual command syntax."""
+COMMAND GUIDELINES:
+- ALWAYS prefer traditional SOS/WinDbg commands: !threads, !threadpool, !dumpheap, !clrstack, !syncblk, !eeheap, !finalizequeue
+- AVOID dx commands - they have complex syntax and high failure rates
+- Only use dx if traditional commands cannot achieve the goal
+- Use commands appropriate for {dump_type}-mode dumps
+- Be specific with commands - use actual command syntax"""
         
         response = self.llm.invoke(prompt)
         hypothesis_data = self._extract_json(response.content)
@@ -167,36 +169,96 @@ Be specific with commands - use actual command syntax."""
             console.print(f"[dim]DEBUG: Clearing {old_count} old evidence items from previous test run[/dim]")
             current_test['evidence'] = []
         
-        # Execute test commands
-        for cmd in current_test['test_commands'][:3]:  # Max 3 commands per test
-            console.print(f"  [cyan]→[/cyan] {cmd}")
+        # Execute test commands with immediate retry on each failure
+        commands_to_execute = current_test['test_commands'][:3].copy()  # Max 3 commands per test
+        max_retries_per_command = 1
+        
+        for cmd_index in range(len(commands_to_execute)):
+            cmd = commands_to_execute[cmd_index]
             
-            output = self.debugger.execute_command(cmd)
-            
-            # DEBUG: Check what type and size we got back
-            console.print(f"[yellow]DEBUG: Command '{cmd}' returned type={type(output)}[/yellow]")
-            
-            # Extract the actual output from the dict returned by debugger
-            if isinstance(output, dict):
-                output_str = output.get('output', '')
-            else:
-                output_str = str(output)
-            
-            console.print(f"[yellow]DEBUG: Extracted output length: {len(output_str)}[/yellow]")
-            
-            if state.get('show_commands'):
-                console.print(f"[dim]{output_str[:500]}...[/dim]" if len(output_str) > 500 else f"[dim]{output_str}[/dim]")
-            
-            evidence_collected.append({
-                'command': cmd,
-                'output': output_str,  # Store just the actual output, not the whole dict
-                'finding': '',
-                'significance': '',
-                'confidence': 'medium'
-            })
-            
-            # Update commands executed
-            state['commands_executed'].append(cmd)
+            for attempt in range(max_retries_per_command + 1):
+                # Only print command on first attempt (avoid duplicate printing after "Retrying with:")
+                if attempt == 0:
+                    console.print(f"  [cyan]→[/cyan] {cmd}")
+                
+                output = self.debugger.execute_command(cmd)
+                
+                # Extract the actual output from the dict returned by debugger
+                if isinstance(output, dict):
+                    output_str = output.get('output', '')
+                else:
+                    output_str = str(output)
+                
+                # Always show a preview of the output - especially important for retry attempts
+                output_preview = output_str[:500] if len(output_str) > 500 else output_str
+                # Show output on retries (attempt > 0) OR if show_commands is enabled
+                if attempt > 0 or state.get('show_commands'):
+                    console.print(f"[dim]{output_preview}{'...' if len(output_str) > 500 else ''}[/dim]")
+                
+                # Detect command failures
+                failed = False
+                if "Error: Unable to bind name" in output_str or "Couldn't resolve" in output_str or "Syntax error" in output_str:
+                    failed = True
+                    error_msg = output_str.strip()[:200]
+                    console.print(f"[red]⚠ Command failed: {error_msg}[/red]")
+                    
+                    # If failed and we can retry, ask LLM for alternative immediately
+                    if attempt < max_retries_per_command:
+                        console.print(f"[yellow]🔄 Asking LLM for alternative command...[/yellow]")
+                        
+                        retry_prompt = f"""The following command failed. Generate ONE alternative command that will work.
+
+HYPOTHESIS: {current_test['hypothesis']}
+EXPECTED IF CONFIRMED: {current_test.get('expected_confirmed', 'Evidence showing the hypothesis is true')}
+
+FAILED COMMAND:
+{cmd}
+
+ERROR:
+{error_msg}
+
+REASON: {"Data model (dx) commands not working - use traditional SOS commands" if "Unable to bind" in error_msg else "Command syntax or execution error"}
+
+Generate ONE alternative command using SOS/WinDbg commands that tests the same thing.
+EXAMPLES: !dumpheap -stat -type <TypeName>, !threadpool, ~*e !clrstack, !syncblk, !do <address>
+
+Return JSON:
+{{
+    "alternative_command": "single command to try instead",
+    "reasoning": "why this will work"
+}}"""
+                        
+                        try:
+                            response = self.llm.invoke(retry_prompt)
+                            retry_data = self._extract_json(response.content)
+                            
+                            # Use the alternative command for next iteration
+                            cmd = retry_data['alternative_command']
+                            console.print(f"[cyan]  Retrying with: {cmd}[/cyan]")
+                            continue  # Retry with new command
+                            
+                        except Exception as e:
+                            console.print(f"[red]Failed to generate alternative: {e}[/red]")
+                            # Fall through to store failed evidence
+                    else:
+                        console.print(f"[yellow]  Max retries reached, storing failure[/yellow]")
+                else:
+                    # Command succeeded
+                    if attempt > 0:
+                        console.print(f"[green]✓ Alternative command succeeded[/green]")
+                
+                # Command succeeded or we've exhausted retries - store evidence and break
+                evidence_collected.append({
+                    'command': cmd,
+                    'output': output_str,
+                    'finding': '',
+                    'significance': '',
+                    'confidence': 'medium',
+                    'failed': failed
+                })
+                
+                state['commands_executed'].append(cmd)
+                break  # Move to next command
         
         # Evaluate results
         evaluation = self._evaluate_test_results(
@@ -205,19 +267,14 @@ Be specific with commands - use actual command syntax."""
         )
         
         # Update test with results
-        # IMPORTANT: Truncate evidence before storing to prevent state bloat
-        truncated_evidence = []
+        # Store evidence with reasonable limits (prepare_evidence will handle dynamic truncation for LLM)
         for e in evidence_collected:
-            truncated_evidence.append({
-                'command': e['command'],
-                'output': e['output'][:300] if len(e.get('output', '')) > 300 else e.get('output', ''),  # Store only 300 chars
-                'finding': e.get('finding', ''),
-                'significance': e.get('significance', ''),
-                'confidence': e.get('confidence', 'medium')
-            })
+            # Keep up to 20K chars per evidence item - prepare_evidence will smartly truncate for LLM
+            if len(e.get('output', '')) > 20000:
+                e['output'] = e['output'][:20000] + '\n[... output truncated at 20K chars ...]'
         
         current_test['result'] = evaluation['result']  # 'confirmed', 'rejected', 'inconclusive'
-        current_test['evidence'] = truncated_evidence  # Store truncated version
+        current_test['evidence'] = evidence_collected  # Store with reasonable limits
         current_test['evaluation_reasoning'] = evaluation['reasoning']
         
         console.print(f"\n[bold]{'✅' if evaluation['result'] == 'confirmed' else '❌' if evaluation['result'] == 'rejected' else '❓'} Result:[/bold] {evaluation['result'].upper()}")
@@ -527,6 +584,11 @@ Return JSON (same format as initial hypothesis):
     "alternative_hypotheses": ["Backup explanation 1", "Backup explanation 2"]
 }}
 
+COMMAND GUIDELINES:
+- ALWAYS prefer traditional SOS/WinDbg commands: !threads, !threadpool, !dumpheap, !clrstack, !syncblk
+- AVOID dx commands - they frequently fail and have complex syntax
+- Only use dx if traditional commands cannot achieve the goal
+
 Learn from the rejected hypothesis - what did the evidence actually show?"""
         
         response = self.llm.invoke(prompt)
@@ -585,23 +647,47 @@ Learn from the rejected hypothesis - what did the evidence actually show?"""
         evidence_list = inconclusive_test.get('evidence', [])
         recent_evidence = evidence_list[-MAX_EVIDENCE_ITEMS:] if len(evidence_list) > MAX_EVIDENCE_ITEMS else evidence_list
         
+        # Identify failed commands
+        failed_commands = []
         evidence_parts = []
         for e in recent_evidence:
             cmd = e.get('command', '')
             output = e.get('output', '')
             truncated = output[:200] if len(output) > 200 else output
             evidence_parts.append(f"{cmd}: {truncated}")
+            
+            # Track failures
+            if e.get('failed') or 'Error:' in output or 'Unable to bind' in output:
+                failed_commands.append(cmd)
         
         if len(evidence_list) > MAX_EVIDENCE_ITEMS:
             evidence_parts.insert(0, f"[Last {MAX_EVIDENCE_ITEMS} of {len(evidence_list)} items]")
         evidence_text = "\n".join(evidence_parts)
         
+        # Build context about failures
+        failure_context = ""
+        if failed_commands:
+            failure_context = f"\n\nFAILED COMMANDS (DO NOT REPEAT THESE):\n"
+            for cmd in failed_commands:
+                failure_context += f"❌ {cmd}\n"
+            failure_context += "\nREASON: Data model (dx) commands are failing. Use traditional SOS commands instead.\n"
+            failure_context += "ALTERNATIVES: !dumpheap -stat, !do <address>, !gcroot, !threadpool, ~*e !clrstack\n"
+        
+        supports_dx = state.get('supports_dx', False)
+        
         prompt = f"""Hypothesis: {hypothesis}
 
 Evidence collected so far is INCONCLUSIVE:
 {evidence_text}
+{failure_context}
 
-What additional commands should we run to clarify?
+What alternative commands should we run to clarify?
+
+IMPORTANT:
+- DO NOT repeat any failed commands
+- If 'dx' commands failed, use traditional SOS commands like !dumpheap, !do, !gcroot
+- Focus on different diagnostic approaches
+- Attempt #{inconclusive_count}/2 - make it count!
 
 Return JSON:
 {{
@@ -609,13 +695,13 @@ Return JSON:
     "reasoning": "Why these commands will clarify the situation"
 }}
 
-Maximum 2 additional commands. Be targeted."""
+Maximum 2 additional commands. Be targeted and use commands that will definitely work."""
         
         response = self.llm.invoke(prompt)
         data = self._extract_json(response.content)
         
-        # Add commands to current test
-        inconclusive_test['test_commands'].extend(data['additional_commands'])
+        # REPLACE the test_commands instead of extending (so we don't re-run failed ones)
+        inconclusive_test['test_commands'] = data['additional_commands']
         inconclusive_test['result'] = None  # Reset to test again
         
         console.print(f"[cyan]🔍 Gathering more evidence (attempt {inconclusive_count}/2):[/cyan] {', '.join(data['additional_commands'])}")

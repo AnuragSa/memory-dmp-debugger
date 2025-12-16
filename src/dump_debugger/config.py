@@ -76,7 +76,7 @@ class Settings(BaseSettings):
         description="Maximum number of retries for failed commands with syntax errors"
     )
     max_hypothesis_attempts: int = Field(
-        default=5,
+        default=8,
         description="Maximum number of hypothesis attempts before forcing investigation"
     )
 

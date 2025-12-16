@@ -438,75 +438,66 @@ def get_efficient_commands_for_hypothesis(
 ) -> list[str]:
     """Get most efficient commands to test a hypothesis.
     
-    Prefers data model commands for user-mode dumps (concise output).
-    Falls back to traditional commands for kernel dumps or complex queries.
+    Uses traditional SOS/WinDbg commands for reliability.
+    Avoids data model (dx) commands due to high failure rates and complex syntax.
     
     Args:
         hypothesis: The hypothesis to test
-        supports_dx: Whether data model commands are available
+        supports_dx: Whether data model commands are available (ignored - always use traditional)
         pattern_name: Optional pattern name for specialized tests
         
     Returns:
         List of commands to execute
     """
-    if not supports_dx:
-        # Kernel dump - use traditional commands
-        if pattern_name and pattern_name in KNOWN_PATTERNS:
-            return KNOWN_PATTERNS[pattern_name]['confirmation_commands']
-        return []
+    # Always use traditional commands - dx has high failure rate
+    if pattern_name and pattern_name in KNOWN_PATTERNS:
+        return KNOWN_PATTERNS[pattern_name]['confirmation_commands']
     
-    # User-mode dump - prefer data model for quick tests
+    # Infer commands from hypothesis keywords
     commands = []
+    hypothesis_lower = hypothesis.lower()
     
-    # Check if pattern has data model quick test
-    if pattern_name and pattern_name in DATA_MODEL_QUICK_TESTS:
-        test_commands = DATA_MODEL_QUICK_TESTS[pattern_name]
-        for key, cmd in test_commands.items():
-            if key != 'interpretation' and key != 'fallback':
-                commands.append(cmd)
-        
-        # Add fallback traditional command if specified
-        if 'fallback' in test_commands:
-            commands.append(test_commands['fallback'])
+    if 'thread' in hypothesis_lower or 'starvation' in hypothesis_lower:
+        commands.extend([
+            '!threads',
+            '!threadpool'
+        ])
     
-    # If no specific pattern, try to infer from hypothesis keywords
-    elif supports_dx:
-        hypothesis_lower = hypothesis.lower()
-        
-        if 'thread' in hypothesis_lower or 'starvation' in hypothesis_lower:
-            commands.extend([
-                DATA_MODEL_QUERIES['thread_count'],
-                DATA_MODEL_QUERIES['blocked_thread_count']
-            ])
-        
-        if 'database' in hypothesis_lower or 'sql' in hypothesis_lower or 'connection' in hypothesis_lower:
-            commands.extend([
-                DATA_MODEL_QUERIES['sql_connection_count'],
-                DATA_MODEL_QUERIES['open_sql_connections']
-            ])
-        
-        if 'deadlock' in hypothesis_lower:
-            commands.append(DATA_MODEL_QUERIES['blocked_thread_count'])
-            commands.append('!syncblk')  # Still need traditional for lock analysis
-        
-        if 'exception' in hypothesis_lower:
-            commands.extend([
-                DATA_MODEL_QUERIES['exception_count'],
-                DATA_MODEL_QUERIES['exception_types']
-            ])
-        
-        if 'task' in hypothesis_lower or 'async' in hypothesis_lower:
-            commands.extend([
-                DATA_MODEL_QUERIES['task_count'],
-                DATA_MODEL_QUERIES['incomplete_tasks']
-            ])
-        
-        if 'memory' in hypothesis_lower or 'leak' in hypothesis_lower:
-            # Memory leaks still benefit from traditional commands for details
-            commands.extend([
-                '!eeheap -gc',
-                '!dumpheap -stat'
-            ])
+    if 'database' in hypothesis_lower or 'sql' in hypothesis_lower or 'connection' in hypothesis_lower:
+        commands.extend([
+            '!dumpheap -stat -type System.Data.SqlClient.SqlConnection',
+            '!dumpheap -stat -type SqlConnection'
+        ])
+    
+    if 'deadlock' in hypothesis_lower or 'lock' in hypothesis_lower:
+        commands.extend([
+            '!syncblk',
+            '~*e !clrstack'
+        ])
+    
+    if 'exception' in hypothesis_lower:
+        commands.extend([
+            '!dumpheap -stat -type System.Exception',
+            '!pe'  # Print exception if one exists
+        ])
+    
+    if 'task' in hypothesis_lower or 'async' in hypothesis_lower:
+        commands.extend([
+            '!dumpheap -stat -type System.Threading.Tasks.Task',
+            '~*e !clrstack'
+        ])
+    
+    if 'memory' in hypothesis_lower or 'leak' in hypothesis_lower:
+        commands.extend([
+            '!eeheap -gc',
+            '!dumpheap -stat'
+        ])
+    
+    if 'http' in hypothesis_lower or 'request' in hypothesis_lower or 'web' in hypothesis_lower:
+        commands.extend([
+            '!dumpheap -stat -type HttpContext',
+            '!threads'
+        ])
     
     return commands if commands else []
 

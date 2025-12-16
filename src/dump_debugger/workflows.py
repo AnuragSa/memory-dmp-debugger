@@ -118,7 +118,7 @@ Return ONLY valid JSON in this exact format:
         # Create evidence
         evidence: Evidence = {
             'command': command,
-            'output': output_str[:1000] if len(output_str) > 1000 else output_str,  # Limit storage
+            'output': output_str[:20000] if len(output_str) > 20000 else output_str,  # Store up to 20K chars
             'finding': f"Executed for task: {task}",
             'significance': "Investigating confirmed hypothesis",
             'confidence': 'medium'
@@ -185,24 +185,52 @@ class ReasonerAgent:
         
         console.print(f"[dim]Analyzing {total_evidence} pieces of evidence...[/dim]")
         
-        # Build evidence summary for reasoning
+        # Build evidence summary with smart truncation
         evidence_summary = []
+        total_chars = 0
+        MAX_TOTAL = 100000  # ~25K tokens for reasoning
+        
         for task, evidence_list in evidence_inventory.items():
+            if total_chars >= MAX_TOTAL:
+                evidence_summary.append(f"\n[Additional tasks truncated to stay within limits]")
+                break
+                
             evidence_summary.append(f"\n**Task: {task}**")
             for e in evidence_list:
                 cmd = e.get('command', 'unknown')
                 output = e.get('output', '')
-                # Limit output size in summary
-                output_preview = output[:300] if len(output) > 300 else output
-                evidence_summary.append(f"- Command: {cmd}")
-                evidence_summary.append(f"  Output: {output_preview}")
+                
+                # Smart truncation based on size
+                if len(output) <= 5000:
+                    output_preview = output
+                elif len(output) <= 20000:
+                    # Head + tail for medium outputs
+                    output_preview = f"{output[:2500]}\n\n[... {len(output) - 5000} chars omitted ...]\n\n{output[-2500:]}"
+                else:
+                    # Head + middle + tail for large outputs
+                    head = output[:2000]
+                    middle_start = len(output) // 2 - 1000
+                    middle = output[middle_start:middle_start + 2000]
+                    tail = output[-2000:]
+                    output_preview = f"{head}\n\n[... section omitted ...]\n\n{middle}\n\n[... section omitted ...]\n\n{tail}"
+                
+                entry = f"- Command: {cmd}\n  Output: {output_preview}"
+                if total_chars + len(entry) > MAX_TOTAL:
+                    evidence_summary.append("  [Remaining evidence truncated]")
+                    break
+                    
+                evidence_summary.append(entry)
+                total_chars += len(entry)
         
         evidence_text = "\n".join(evidence_summary)
+        console.print(f"[dim]Prepared reasoning evidence: {len(evidence_text)} chars (~{len(evidence_text)//4} tokens)[/dim]")
         
         # Get hypothesis test history
         tests_summary = []
         for test in state.get('hypothesis_tests', []):
-            tests_summary.append(f"- {test['hypothesis']}: {test.get('result', 'pending').upper()}")
+            result = test.get('result')
+            result_str = result.upper() if result else 'PENDING'
+            tests_summary.append(f"- {test['hypothesis']}: {result_str}")
         tests_text = "\n".join(tests_summary)
         
         prompt = f"""Analyze all the evidence from this crash dump investigation and draw conclusions.
@@ -298,18 +326,42 @@ class ReportWriterAgentV2:
         
         test_history_text = "\n".join(test_history)
         
-        # Build evidence summary (limited to prevent overflow)
+        # Build evidence summary with smart truncation for comprehensive reporting
         evidence_summary = []
-        for task, evidence_list in list(evidence.items())[:10]:  # Max 10 tasks
+        total_chars = 0
+        MAX_TOTAL = 120000  # ~30K tokens for final report
+        
+        for task, evidence_list in evidence.items():
+            if total_chars >= MAX_TOTAL:
+                evidence_summary.append(f"\n[Additional tasks omitted to stay within limits]")
+                break
+                
             evidence_summary.append(f"\n**{task}:**")
-            for e in evidence_list[:3]:  # Max 3 evidence items per task
+            for e in evidence_list:
                 cmd = e.get('command', 'unknown')
+                output = e.get('output', '')
                 finding = e.get('finding', '')
-                evidence_summary.append(f"- {cmd}")
+                
+                # Include command and smart output preview
+                if len(output) <= 3000:
+                    output_preview = output
+                else:
+                    # Show head + tail for context
+                    output_preview = f"{output[:1500]}\n[... {len(output) - 3000} chars ...]\n{output[-1500:]}"
+                
+                entry = f"- Command: {cmd}\n  Output: {output_preview}"
                 if finding:
-                    evidence_summary.append(f"  {finding[:150]}")
+                    entry += f"\n  Finding: {finding}"
+                    
+                if total_chars + len(entry) > MAX_TOTAL:
+                    evidence_summary.append("  [Remaining evidence omitted]")
+                    break
+                    
+                evidence_summary.append(entry)
+                total_chars += len(entry)
         
         evidence_text = "\n".join(evidence_summary)
+        console.print(f"[dim]Prepared report evidence: {len(evidence_text)} chars (~{len(evidence_text)//4} tokens)[/dim]")
         conclusions_text = "\n".join(f"- {c}" for c in conclusions)
         
         context = f"""Generate a comprehensive crash dump analysis report.
