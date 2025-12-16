@@ -395,10 +395,14 @@ Write in clear, professional technical language.
 """
 
         try:
+            # Use 5 minute timeout for report generation to handle large contexts
+            from langchain_core.runnables import RunnableConfig
+            config = RunnableConfig(timeout=300)  # 5 minute timeout
+            
             response = self.llm.invoke([
                 SystemMessage(content="You are an expert at writing technical crash analysis reports for Windows applications."),
                 HumanMessage(content=context)
-            ])
+            ], config=config)
             
             report = response.content
             console.print("[green]✓ Report generated[/green]")
