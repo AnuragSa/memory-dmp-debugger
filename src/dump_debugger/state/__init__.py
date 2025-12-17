@@ -34,6 +34,15 @@ class CommandResult(TypedDict):
     error: str | None
 
 
+class ChatMessage(TypedDict):
+    """A message in the interactive chat session."""
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: str
+    commands_executed: list[str]
+    evidence_used: list[str]
+
+
 class AnalysisState(TypedDict):
     """State for hypothesis-driven workflow: Hypothesis → Test → Investigate → Reason → Report."""
     
@@ -77,6 +86,12 @@ class AnalysisState(TypedDict):
     sos_loaded: bool
     show_commands: bool
     should_continue: bool
+    
+    # Interactive mode
+    interactive_mode: bool
+    chat_history: list[ChatMessage]
+    chat_active: bool
+    user_requested_report: bool
 
 
 class PlannerOutput(TypedDict):

@@ -70,14 +70,15 @@ def analyze(
             enable_logging(log_output)
         
         if interactive:
-            console.print("[yellow]Interactive mode not yet implemented[/yellow]")
+            console.print("[cyan]Interactive mode enabled - you can ask follow-up questions after analysis[/cyan]")
         
         # Run the hypothesis-driven analysis
         report = run_analysis(
             dump_path, 
             issue, 
             show_commands=show_commands,
-            log_to_file=(log_output is not None)
+            log_to_file=(log_output is not None),
+            interactive=interactive
         )
         
         # Save to file if requested

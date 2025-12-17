@@ -87,6 +87,16 @@ class Settings(BaseSettings):
         default=8,
         description="Maximum number of hypothesis attempts before forcing investigation"
     )
+    
+    # Interactive chat mode
+    max_chat_messages: int = Field(
+        default=50,
+        description="Maximum number of messages in chat history"
+    )
+    chat_session_timeout_minutes: int = Field(
+        default=30,
+        description="Maximum time for interactive chat session in minutes"
+    )
 
     def get_debugger_path(self, prefer_cdb: bool = True) -> Path:
         """Get the debugger executable path."""

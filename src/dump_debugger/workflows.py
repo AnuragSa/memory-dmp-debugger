@@ -664,6 +664,7 @@ def run_analysis(
     issue_description: str,
     show_commands: bool = False,
     log_to_file: bool = True,
+    interactive: bool = False,
 ) -> str:
     """Run expert-level hypothesis-driven memory dump analysis.
     
@@ -672,6 +673,7 @@ def run_analysis(
         issue_description: User's description of the issue
         show_commands: Whether to show debugger command outputs
         log_to_file: Whether to log output to session.log
+        interactive: Whether to enable interactive chat mode after analysis
         
     Returns:
         Final analysis report
@@ -735,6 +737,12 @@ def run_analysis(
             'sos_loaded': False,
             'show_commands': show_commands,
             'should_continue': True,
+            
+            # Interactive mode
+            'interactive_mode': interactive,
+            'chat_history': [],
+            'chat_active': False,
+            'user_requested_report': False,
         }
         
         # Create and run workflow
