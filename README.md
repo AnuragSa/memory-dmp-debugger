@@ -6,7 +6,8 @@ An AI-powered memory dump analyzer that uses hypothesis-driven investigation wit
 
 - 🧠 **Hypothesis-Driven Analysis**: Forms and tests hypotheses like an expert debugger
 - 🎯 **Adaptive Investigation**: Learns from evidence and pivots when hypotheses are rejected
-- 🔍 **Pattern Recognition**: Automatically recognizes 9 common failure patterns (deadlocks, leaks, starvation, etc.)
+- � **Interactive Chat Mode**: Ask follow-up questions after automated analysis completes
+- �🔍 **Pattern Recognition**: Automatically recognizes 9 common failure patterns (deadlocks, leaks, starvation, etc.)
 - 💡 **Expert Knowledge Base**: Built-in heuristics and domain knowledge for quick diagnosis
 - 🚀 **Efficient Testing**: Tests hypotheses with 2-3 commands before deep investigation
 - 📈 **Rich CLI**: Beautiful terminal interface with real-time analysis progress
@@ -25,6 +26,125 @@ The debugger works like an expert engineer would:
    - If INCONCLUSIVE → Gather more targeted evidence (max 2 attempts)
 5. **Investigate**: Execute focused tasks to pinpoint the exact issue
 6. **Report**: Generate actionable findings with evidence
+
+## Interactive Mode
+
+After automated analysis completes, you can ask follow-up questions about the dump. The agent uses existing evidence when possible and executes new debugger commands only when needed.
+
+### Quick Start
+
+```bash
+# Enable interactive mode
+dump-debugger analyze crash.dmp --issue "App hanging" --interactive
+```
+
+### How It Works
+
+The interactive agent follows a 3-step process for each question:
+
+1. **Build Context** - Gathers relevant evidence from the automated analysis
+2. **Assess Sufficiency** - Determines if existing evidence can answer the question
+3. **Investigate** - Runs additional debugger commands only if more data is needed
+
+### Special Commands
+
+| Command | Description |
+|---------|-------------|
+| `/exit` or `/quit` | Exit interactive mode |
+| `/help` | Show available commands |
+| `/report` | Regenerate and display the full analysis report |
+| `/history` | Show conversation history with message count |
+| `/evidence` | List available evidence (conclusions, hypothesis tests, collected data) |
+
+### Session Management
+
+- **Timeout**: Sessions automatically timeout after 30 minutes (configurable)
+- **Message Limit**: Chat history limited to 50 messages (configurable)
+- **Graceful Exit**: Press Ctrl+C or Ctrl+D to exit anytime
+
+### Configuration
+
+Add these settings to your `.env` file:
+
+```env
+# Interactive chat mode settings
+MAX_CHAT_MESSAGES=50                    # Maximum messages in chat history
+CHAT_SESSION_TIMEOUT_MINUTES=30         # Session timeout in minutes
+```
+
+### Example Session
+
+```
+═══════════════════════════════════════════════════
+INTERACTIVE CHAT MODE
+═══════════════════════════════════════════════════
+
+You can now ask follow-up questions about the dump.
+Special commands: /exit (quit), /report (regenerate), /help (show help)
+Session timeout: 30 minutes
+
+Your question: What threads are blocked?
+
+❓ Question: What threads are blocked?
+✓ Sufficient evidence: Information available from !threads output
+
+💬 Answer:
+Based on the !threads output from the investigation, 18 out of 54 threads 
+are blocked. They are all waiting on lock 0x000001a2b3c4d5e6 which is held 
+by thread 42. The blocked threads have call stacks showing they're waiting 
+in the VB expression compiler.
+
+Your question: Show me thread 42's call stack
+
+❓ Question: Show me thread 42's call stack
+🔍 Need more data: Need to get specific thread call stack
+Executing 1 investigative command(s)...
+  Running: ~42s
+  ✓ 00 00007ff8`1234abcd ntdll!NtWaitForSingleObject...
+
+💬 Answer:
+Thread 42 is the lock holder. Its call stack shows...
+
+Your question: /exit
+
+👋 Exiting interactive mode. Goodbye!
+```
+
+### Example Questions
+
+**Root Cause Investigation:**
+- "What was the last exception thrown?"
+- "Which thread caused the crash?"
+- "What is the root cause of the deadlock?"
+
+**Thread Analysis:**
+- "Show me all blocked threads"
+- "What is thread 12 waiting for?"
+- "Are there any threads in infinite loops?"
+
+**Memory Analysis:**
+- "Are there any memory leaks?"
+- "What objects are consuming the most memory?"
+- "Show me the largest objects on the heap"
+
+**Lock Analysis:**
+- "What locks are held?"
+- "Which threads are waiting on locks?"
+- "Is there a deadlock?"
+
+**Exception Analysis:**
+- "What exceptions were thrown?"
+- "Show me the exception call stack"
+- "What is the exception message?"
+
+### Report Integration
+
+All questions and answers from the interactive session are automatically appended to the final report under a "Follow-up Questions & Answers" section with:
+- Each Q&A pair
+- Commands executed for each answer
+- Timestamps and evidence citations
+
+This ensures your entire investigation is documented for future reference.
 
 ## Known Patterns
 
@@ -131,6 +251,11 @@ uv run dump-debugger analyze crash.dmp --issue "High CPU usage" --output report.
 Show debugger commands as they execute:
 ```powershell
 uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --show-commands
+```
+
+Interactive mode (ask follow-up questions):
+```powershell
+uv run dump-debugger analyze crash.dmp --issue "App hanging" --interactive
 ```
 
 Save detailed session log:

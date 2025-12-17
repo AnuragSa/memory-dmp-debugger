@@ -44,6 +44,11 @@ class InteractiveChatAgent:
         Returns:
             Updated state with new chat message
         """
+        # Validate input
+        if not user_question or not user_question.strip():
+            console.print("[yellow]⚠ Empty question provided[/yellow]")
+            return {'chat_history': state.get('chat_history', [])}  # Return current state, no changes
+        
         console.print(f"\n[cyan]❓ Question:[/cyan] {user_question}")
         
         # Step 1: Build context from existing evidence
@@ -75,7 +80,7 @@ class InteractiveChatAgent:
         timestamp = datetime.now().isoformat()
         evidence_refs = [e['command'] for e in context['relevant_evidence']]
         if new_evidence:
-            evidence_refs.extend([e.command for e in new_evidence])
+            evidence_refs.extend([e['command'] for e in new_evidence])
         
         user_msg: ChatMessage = {
             'role': 'user',
@@ -278,14 +283,14 @@ Respond in JSON format:
         for command in suggested_commands[:5]:  # Limit to 5 commands
             console.print(f"  [dim]Running:[/dim] {command}")
             
-            success, output, error = self.debugger.execute_command(command)
+            result = self.debugger.execute_command(command)
             commands_executed.append(command)
             
-            if success and output:
+            if result['success'] and result['output']:
                 # Create evidence entry
                 evidence: Evidence = {
                     'command': command,
-                    'output': output,
+                    'output': result['output'],
                     'finding': f"Data for: {question}",
                     'significance': 'medium',
                     'confidence': 'medium'
@@ -293,10 +298,11 @@ Respond in JSON format:
                 new_evidence.append(evidence)
                 
                 # Show truncated output
-                output_preview = output[:200] + "..." if len(output) > 200 else output
+                output_preview = result['output'][:200] + "..." if len(result['output']) > 200 else result['output']
                 console.print(f"  [green]✓[/green] {output_preview}")
             else:
-                console.print(f"  [red]✗ Error:[/red] {error}")
+                error_msg = result.get('error', 'Unknown error')
+                console.print(f"  [red]✗ Error:[/red] {error_msg}")
         
         return commands_executed, new_evidence
     

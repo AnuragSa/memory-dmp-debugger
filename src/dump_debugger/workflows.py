@@ -10,6 +10,7 @@ from rich.console import Console
 from dump_debugger.config import settings
 from dump_debugger.core import DebuggerWrapper
 from dump_debugger.hypothesis_agent import HypothesisDrivenAgent
+from dump_debugger.interactive_agent import InteractiveChatAgent
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, Evidence, InvestigatorOutput, ReasonerOutput
 
@@ -301,6 +302,73 @@ class ReportWriterAgentV2:
     def __init__(self):
         self.llm = get_llm(temperature=0.2)
     
+    def show_analysis_summary(self, state: AnalysisState) -> dict:
+        """Show comprehensive analysis in terminal without generating LLM report.
+        
+        Used in interactive mode to display all findings before Q&A session.
+        Full LLM-generated report is only created when user explicitly requests it via /report.
+        """
+        console.print(f"\n[bold green]═══════════════════════════════════════════════════[/bold green]")
+        console.print(f"[bold green]ANALYSIS COMPLETE[/bold green]")
+        console.print(f"[bold green]═══════════════════════════════════════════════════[/bold green]\n")
+        
+        # Display comprehensive findings
+        issue = state.get('issue_description', 'Unknown')
+        hypothesis = state.get('current_hypothesis', 'Unknown')
+        confidence = state.get('confidence_level', 'medium')
+        conclusions = state.get('conclusions', [])
+        analysis = state.get('reasoner_analysis', '')
+        hypothesis_tests = state.get('hypothesis_tests', [])
+        
+        # Issue
+        console.print(f"[bold cyan]Original Issue:[/bold cyan] {issue}\n")
+        
+        # Final Hypothesis
+        console.print(f"[bold cyan]Final Hypothesis:[/bold cyan]")
+        console.print(f"{hypothesis}")
+        console.print(f"[bold cyan]Confidence:[/bold cyan] {confidence.upper()}\n")
+        
+        # Hypothesis Testing History
+        if hypothesis_tests:
+            console.print(f"[bold cyan]Hypothesis Testing Process:[/bold cyan]")
+            for i, test in enumerate(hypothesis_tests, 1):
+                result = test.get('result')
+                result_str = result.upper() if result else 'PENDING'
+                hyp = test.get('hypothesis', 'Unknown')
+                
+                if result == 'confirmed':
+                    console.print(f"  {i}. [green]{hyp} → {result_str}[/green]")
+                elif result == 'rejected':
+                    console.print(f"  {i}. [red]{hyp} → {result_str}[/red]")
+                else:
+                    console.print(f"  {i}. [yellow]{hyp} → {result_str}[/yellow]")
+                
+                reasoning = test.get('evaluation_reasoning', '')
+                if reasoning:
+                    console.print(f"     [dim]{reasoning[:300]}[/dim]")
+            console.print()
+        
+        # Key Conclusions
+        if conclusions:
+            console.print("[bold cyan]Key Conclusions:[/bold cyan]")
+            for i, conclusion in enumerate(conclusions, 1):
+                console.print(f"  {i}. {conclusion}")
+            console.print()
+        
+        # Detailed Analysis
+        if analysis:
+            console.print("[bold cyan]Detailed Analysis:[/bold cyan]")
+            console.print(analysis)
+            console.print()
+        
+        console.print("[dim]Type /report to generate a formatted report, or ask follow-up questions below.[/dim]\n")
+        
+        # Store a placeholder that report can be generated on demand
+        return {
+            'final_report': None,  # Will be generated on /report command
+            'should_continue': False
+        }
+    
     def generate_report(self, state: AnalysisState) -> dict:
         """Generate comprehensive analysis report."""
         console.print(f"\n[bold green]📊 Generating Final Report[/bold green]")
@@ -405,6 +473,12 @@ Write in clear, professional technical language.
             ], config=config)
             
             report = response.content
+            
+            # Append chat history if interactive session occurred
+            chat_history = state.get('chat_history', [])
+            if chat_history:
+                report += self._append_chat_section(chat_history)
+            
             console.print("[green]✓ Report generated[/green]")
             
             return {
@@ -412,26 +486,77 @@ Write in clear, professional technical language.
                 'should_continue': False
             }
         except Exception as e:
-            console.print(f"[yellow]⚠ Report generation error: {e}, using fallback[/yellow]")
-            # Fallback report
+            console.print(f"\n[yellow]⚠ Report generation error: {e}[/yellow]")
+            console.print(f"[yellow]Using fallback report format...[/yellow]\n")
+            
+            # Build fallback report with all available information
             fallback_report = f"""# Crash Dump Analysis Report
 
-## Issue
+## Issue Description
 {state['issue_description']}
 
-## Hypothesis
+## Final Hypothesis
 {hypothesis}
 
-## Conclusion
-{conclusions_text}
+## Confidence Level
+{confidence.upper()}
 
-## Analysis
-{analysis}
+## Key Conclusions
+{conclusions_text if conclusions_text else 'No conclusions available'}
+
+## Detailed Analysis
+{analysis if analysis else 'No detailed analysis available'}
+
+## Hypothesis Testing History
+{test_history_text if test_history_text else 'No hypothesis tests recorded'}
+
+---
+*Note: This is a fallback report due to LLM timeout. Full report generation failed.*
 """
+            
+            # Append chat history if available
+            chat_history = state.get('chat_history', [])
+            if chat_history:
+                fallback_report += self._append_chat_section(chat_history)
+            
+            console.print("[green]✓ Fallback report generated[/green]")
+            
             return {
                 'final_report': fallback_report,
                 'should_continue': False
             }
+    
+    def _append_chat_section(self, chat_history: list) -> str:
+        """Append interactive Q&A section to report.
+        
+        Args:
+            chat_history: List of ChatMessage entries
+            
+        Returns:
+            Formatted chat section as markdown
+        """
+        section = "\n\n---\n\n# Follow-up Questions & Answers\n\n"
+        section += "The following questions were asked during the interactive analysis session:\n\n"
+        
+        # Group messages by Q&A pairs
+        for i in range(0, len(chat_history), 2):
+            if i + 1 < len(chat_history):
+                user_msg = chat_history[i]
+                assistant_msg = chat_history[i + 1]
+                
+                section += f"## Question {i//2 + 1}\n\n"
+                section += f"**User:** {user_msg['content']}\n\n"
+                section += f"**Answer:** {assistant_msg['content']}\n\n"
+                
+                # Add commands executed if any
+                commands = assistant_msg.get('commands_executed', [])
+                if commands:
+                    section += "*Investigative commands executed:*\n"
+                    for cmd in commands:
+                        section += f"- `{cmd}`\n"
+                    section += "\n"
+        
+        return section
 
 
 class TeeOutput:
@@ -460,6 +585,121 @@ _log_file_handle = None
 _original_stdout = None
 
 
+def handle_special_command(command: str, state: AnalysisState) -> dict:
+    """Handle special commands in interactive mode.
+    
+    Args:
+        command: The special command (e.g., /exit, /help)
+        state: Current analysis state
+        
+    Returns:
+        State updates
+    """
+    cmd = command.lower().strip()
+    
+    if cmd == '/exit' or cmd == '/quit':
+        console.print("\n[cyan]👋 Exiting interactive mode. Goodbye![/cyan]")
+        return {'chat_active': False}
+    
+    elif cmd == '/help':
+        console.print("\n[bold cyan]Available Commands:[/bold cyan]")
+        console.print("  [green]/exit, /quit[/green]     - Exit interactive mode")
+        console.print("  [green]/report[/green]          - Regenerate full analysis report")
+        console.print("  [green]/history[/green]         - Show chat history")
+        console.print("  [green]/evidence[/green]        - List available evidence")
+        console.print("  [green]/help[/green]            - Show this help message")
+        console.print("\n[dim]Or just ask a question about the dump![/dim]\n")
+        return {}
+    
+    elif cmd == '/report':
+        console.print("\n[cyan]📄 Generating full analysis report...[/cyan]\n")
+        
+        # Check if report already exists
+        report = state.get('final_report')
+        
+        if report is None:
+            # Generate report on-demand
+            from dump_debugger.workflows import ReportWriterAgentV2
+            report_writer = ReportWriterAgentV2()
+            result = report_writer.generate_report(state)
+            report = result.get('final_report', 'Report generation failed')
+            
+            # Display it
+            console.print(report)
+            console.print()
+            
+            # Return updated state with report
+            return {
+                'final_report': report,
+                'user_requested_report': True
+            }
+        else:
+            # Report already exists, just display it
+            console.print(report)
+            console.print()
+            return {'user_requested_report': True}
+    
+    elif cmd == '/history':
+        chat_history = state.get('chat_history', [])
+        if not chat_history:
+            console.print("\n[dim]No chat history yet.[/dim]\n")
+        else:
+            console.print("\n[bold cyan]Chat History:[/bold cyan]\n")
+            for i, msg in enumerate(chat_history, 1):
+                role = msg['role']
+                content = msg['content']
+                timestamp = msg.get('timestamp', 'N/A')
+                
+                if role == 'user':
+                    console.print(f"[bold cyan]{i}. You:[/bold cyan] {content}")
+                else:
+                    # Truncate long assistant responses
+                    preview = content[:200] + "..." if len(content) > 200 else content
+                    console.print(f"[green]{i}. Assistant:[/green] {preview}")
+            console.print()
+        return {}
+    
+    elif cmd == '/evidence':
+        console.print("\n[bold cyan]Available Evidence:[/bold cyan]\n")
+        
+        # Show conclusions
+        conclusions = state.get('conclusions', [])
+        if conclusions:
+            console.print("[bold]Key Conclusions:[/bold]")
+            for i, conclusion in enumerate(conclusions, 1):
+                console.print(f"  {i}. {conclusion}")
+            console.print()
+        
+        # Show hypothesis tests
+        hypothesis_tests = state.get('hypothesis_tests', [])
+        if hypothesis_tests:
+            console.print(f"[bold]Hypothesis Tests:[/bold] {len(hypothesis_tests)} tests conducted")
+            for i, test in enumerate(hypothesis_tests[:3], 1):
+                hypothesis = test.get('hypothesis', 'N/A')
+                result = test.get('result', 'N/A')
+                console.print(f"  {i}. {hypothesis} → {result}")
+            if len(hypothesis_tests) > 3:
+                console.print(f"  ... and {len(hypothesis_tests) - 3} more")
+            console.print()
+        
+        # Show evidence inventory
+        evidence_inventory = state.get('evidence_inventory', {})
+        total_evidence = sum(len(ev_list) for ev_list in evidence_inventory.values())
+        if total_evidence > 0:
+            console.print(f"[bold]Evidence Collected:[/bold] {total_evidence} pieces")
+            for task, evidence_list in list(evidence_inventory.items())[:3]:
+                console.print(f"  • {task}: {len(evidence_list)} items")
+            console.print()
+        
+        console.print("[dim]Ask a question to explore this evidence![/dim]\n")
+        return {}
+    
+    else:
+        console.print(f"[yellow]Unknown command: {command}[/yellow]")
+        console.print("[dim]Type /help for available commands[/dim]\n")
+        return {}
+
+
 def create_expert_workflow(dump_path: Path) -> StateGraph:
     """Create expert-level hypothesis-driven workflow.
     
@@ -478,6 +718,7 @@ def create_expert_workflow(dump_path: Path) -> StateGraph:
     investigator = InvestigatorAgent(debugger)
     reasoner = ReasonerAgent()
     report_writer = ReportWriterAgentV2()
+    interactive_chat = InteractiveChatAgent(debugger)
 
     # Create the graph
     workflow = StateGraph(AnalysisState)
@@ -536,8 +777,74 @@ def create_expert_workflow(dump_path: Path) -> StateGraph:
         return reasoner.reason(state)
 
     def report_node(state: AnalysisState) -> dict:
-        """Generate final report."""
-        return report_writer.generate_report(state)
+        """Generate final report or show analysis summary in interactive mode."""
+        # In interactive mode, skip report generation and show summary instead
+        if state.get('interactive_mode', False):
+            return report_writer.show_analysis_summary(state)
+        else:
+            return report_writer.generate_report(state)
+    
+    def chat_loop_node(state: AnalysisState) -> dict:
+        """Interactive chat loop for user questions."""
+        from datetime import datetime, timedelta
+        
+        # If this is the first time entering chat, activate it
+        if not state.get('chat_active'):
+            console.print("\n[bold green]═══════════════════════════════════════════════════[/bold green]")
+            console.print("[bold green]INTERACTIVE CHAT MODE[/bold green]")
+            console.print("[bold green]═══════════════════════════════════════════════════[/bold green]")
+            console.print("\n[cyan]You can now ask follow-up questions about the dump.[/cyan]")
+            console.print("[dim]Special commands: /exit (quit), /report (regenerate), /help (show help)[/dim]")
+            console.print(f"[dim]Session timeout: {settings.chat_session_timeout_minutes} minutes[/dim]\n")
+            
+            # Store session start time
+            return {
+                'chat_active': True,
+                '_chat_start_time': datetime.now().isoformat()
+            }
+        
+        # Check session timeout
+        start_time_str = state.get('_chat_start_time')
+        if start_time_str:
+            start_time = datetime.fromisoformat(start_time_str)
+            elapsed = datetime.now() - start_time
+            timeout_duration = timedelta(minutes=settings.chat_session_timeout_minutes)
+            
+            if elapsed > timeout_duration:
+                console.print("\n[yellow]⏰ Chat session timeout reached. Exiting interactive mode...[/yellow]")
+                return {'chat_active': False}
+        
+        # Get user input
+        try:
+            user_input = console.input("[bold cyan]Your question:[/bold cyan] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[cyan]👋 Exiting interactive mode...[/cyan]")
+            return {'chat_active': False}
+        except Exception as e:
+            console.print(f"\n[red]Input error: {e}. Exiting interactive mode...[/red]")
+            return {'chat_active': False}
+        if not user_input:
+            console.print("[dim]Please enter a question or /exit to quit[/dim]")
+            return {'chat_history': state.get('chat_history', [])}  # No changes to state
+        
+        # Handle special commands
+        if user_input.startswith('/'):
+            return handle_special_command(user_input, state)
+        
+        # Answer the question using InteractiveChatAgent
+        try:
+            result = interactive_chat.answer_question(state, user_input)
+            return result
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Operation cancelled. Type /exit to quit or ask another question.[/yellow]")
+            return {'chat_history': state.get('chat_history', [])}  # No changes
+        except Exception as e:
+            console.print(f"\n[red]Error processing question: {e}[/red]")
+            console.print("[yellow]Exiting interactive mode due to error. Please restart if needed.[/yellow]")
+            import traceback
+            console.print(f"[dim]{traceback.format_exc()}[/dim]")
+            # Exit chat mode on error to prevent infinite loops
+            return {'chat_active': False}
 
     # Add nodes
     workflow.add_node("form_hypothesis", form_hypothesis_node)
@@ -546,6 +853,7 @@ def create_expert_workflow(dump_path: Path) -> StateGraph:
     workflow.add_node("investigate", investigate_node)
     workflow.add_node("reason", reason_node)
     workflow.add_node("report", report_node)
+    workflow.add_node("chat", chat_loop_node)
 
     # Define routing logic
     def route_after_test(state: AnalysisState) -> str:
@@ -652,9 +960,38 @@ def create_expert_workflow(dump_path: Path) -> StateGraph:
         }
     )
     
+    # Routing after report
+    def route_after_report(state: AnalysisState) -> str:
+        """Route after report: to chat if interactive mode, otherwise END."""
+        if state.get('interactive_mode', False):
+            return "chat"
+        return "end"
+    
+    # Routing in chat loop
+    def route_after_chat(state: AnalysisState) -> str:
+        """Route after chat: continue chat or END."""
+        if state.get('chat_active', False):
+            return "chat"
+        return "end"
+    
     # Final steps
     workflow.add_edge("reason", "report")
-    workflow.add_edge("report", END)
+    workflow.add_conditional_edges(
+        "report",
+        route_after_report,
+        {
+            "chat": "chat",
+            "end": END
+        }
+    )
+    workflow.add_conditional_edges(
+        "chat",
+        route_after_chat,
+        {
+            "chat": "chat",
+            "end": END
+        }
+    )
 
     return workflow
 
