@@ -56,6 +56,14 @@ class Settings(BaseSettings):
         default=r"SRV*c:\symbols*https://msdl.microsoft.com/download/symbols",
         description="Symbol server path"
     )
+    sos_dll_path: Path | None = Field(
+        default=None,
+        description="Path to SOS.dll for .NET dump analysis (optional - auto-detect if not specified). Use this when analyzing dumps from different .NET runtime versions."
+    )
+    mscordacwks_path: Path | None = Field(
+        default=None,
+        description="Path to mscordacwks.dll (or mscordaccore.dll) for .NET dump analysis (optional - auto-download if not specified). MUST match exact runtime build version. Critical for dump analysis."
+    )
 
     # Application Configuration
     log_level: str = Field(default="INFO", description="Logging level")

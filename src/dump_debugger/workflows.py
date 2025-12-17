@@ -571,11 +571,11 @@ def create_expert_workflow(dump_path: Path) -> StateGraph:
         
         # Check maximum hypothesis attempts
         num_hypotheses = len(state.get('hypothesis_tests', []))
-        if num_hypotheses >= settings.max_hypothesis_attempts and status == 'testing':
+        if num_hypotheses >= settings.max_hypothesis_attempts:
             console.print(f"[yellow]⚠ Max hypothesis attempts ({settings.max_hypothesis_attempts}) reached[/yellow]")
-            console.print("[yellow]Proceeding to investigation with current hypothesis...[/yellow]")
-            # Force the last hypothesis to be "confirmed" so we can proceed
-            return "investigate"
+            console.print("[yellow]Moving to analysis with evidence collected so far...[/yellow]")
+            # Skip further hypothesis testing and investigation - go straight to reasoning
+            return "reason"
         
         if status == 'confirmed':
             # Hypothesis confirmed - start deep investigation

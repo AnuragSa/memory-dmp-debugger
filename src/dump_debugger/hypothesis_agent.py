@@ -711,9 +711,10 @@ Maximum 2 additional commands. Be targeted and use commands that will definitely
         }
     
     def _extract_json(self, content: str) -> dict[str, Any]:
-        """Extract JSON from LLM response."""
-        # Remove markdown code blocks
+        """Extract JSON from LLM response with robust parsing."""
         content = content.strip()
+        
+        # Method 1: Remove markdown code blocks
         if content.startswith('```'):
             parts = content.split('```')
             if len(parts) >= 2:
@@ -722,21 +723,45 @@ Maximum 2 additional commands. Be targeted and use commands that will definitely
                     content = content[4:]
                 content = content.strip()
         
+        # Method 2: Try direct parse
         try:
             return json.loads(content)
-        except json.JSONDecodeError as e:
-            console.print(f"[red]JSON parse error: {e}[/red]")
-            console.print(f"[dim]Content: {content[:200]}[/dim]")
-            
-            # Try to find JSON in the content
-            import re
-            # Look for JSON object pattern
-            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', content, re.DOTALL)
-            if json_match:
-                try:
-                    return json.loads(json_match.group(0))
-                except json.JSONDecodeError:
-                    pass
-            
-            # If all else fails, raise the original error
-            raise
+        except json.JSONDecodeError:
+            pass
+        
+        # Method 3: Find JSON object with balanced braces
+        import re
+        
+        # Find all potential JSON starts
+        brace_positions = [i for i, c in enumerate(content) if c == '{']
+        
+        for start_pos in brace_positions:
+            # Count braces to find matching closing brace
+            depth = 0
+            for i in range(start_pos, len(content)):
+                if content[i] == '{':
+                    depth += 1
+                elif content[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # Found complete JSON object
+                        json_str = content[start_pos:i+1]
+                        try:
+                            return json.loads(json_str)
+                        except json.JSONDecodeError:
+                            continue  # Try next position
+        
+        # Method 4: Last resort - try to extract from first { to last }
+        first_brace = content.find('{')
+        last_brace = content.rfind('}')
+        if first_brace != -1 and last_brace != -1 and first_brace < last_brace:
+            json_str = content[first_brace:last_brace+1]
+            try:
+                return json.loads(json_str)
+            except json.JSONDecodeError:
+                pass
+        
+        # Failed all methods
+        console.print(f"[red]Failed to extract JSON from response[/red]")
+        console.print(f"[dim]Content preview: {content[:500]}...[/dim]")
+        raise ValueError(f"Could not parse JSON from LLM response. Response started with: {content[:100]}")

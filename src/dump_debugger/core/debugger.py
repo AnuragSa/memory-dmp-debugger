@@ -120,18 +120,140 @@ class DebuggerWrapper:
             self._reader_thread.start()
             
             # Load symbols on startup
-            console.print("[dim]Loading symbols (this may take a minute)...[/dim]")
+            console.print("[dim]Loading symbols (this may take a minute)...")
             # Don't use .symfix+ since we already set symbol path via -y
             # Just reload symbols with the configured path
             self._send_command(".reload")
             
-            # Load SOS extension (try both Framework and Core)
+            # Detect CLR version in dump first
+            console.print("[dim]Detecting CLR version in dump...[/dim]")
+            self._send_command("lmvm clr")
+            self._send_command("lmvm coreclr")
+            time.sleep(1)
+            version_output = self._get_buffer_output()
+            
+            # Extract CLR version
+            clr_version_match = re.search(r'product:\s+Microsoft.*?\.NET.*?version\s+([0-9.]+)', version_output, re.IGNORECASE)
+            if clr_version_match:
+                clr_version = clr_version_match.group(1)
+                console.print(f"[cyan]→ CLR Version in dump:[/cyan] {clr_version}")
+            else:
+                console.print("[yellow]⚠ Could not detect CLR version[/yellow]")
+            
+            # Load DAC (Data Access Component) - MUST be loaded before SOS
+            console.print("[dim]Loading CLR Data Access Component (DAC)...[/dim]")
+            if settings.mscordacwks_path and settings.mscordacwks_path.exists():
+                # Use custom DAC path for exact version matching
+                console.print(f"[cyan]→ Using custom DAC:[/cyan] {settings.mscordacwks_path}")
+                self._send_command(f".cordll -lp {settings.mscordacwks_path}")
+                time.sleep(1)
+                # Verify which DAC loaded
+                self._send_command(".cordll")
+                time.sleep(0.5)
+                output = self._get_buffer_output()
+                console.print(f"[dim]DAC status output: {output[:200]}...[/dim]")
+                
+                # Extract DAC info
+                dac_match = re.search(r'CLR DLL status:.*?([^\s]+(?:mscordacwks|mscordaccore)\.dll)', output, re.IGNORECASE | re.DOTALL)
+                if dac_match:
+                    console.print(f"[green]✓ DAC loaded:[/green] {dac_match.group(1)}")
+                elif 'successfully loaded' in output.lower():
+                    console.print(f"[green]✓ Custom DAC loaded[/green]")
+                
+                # VERIFY DAC is actually working by testing with a real SOS command that requires DAC
+                console.print("[dim]Verifying DAC compatibility with !threads test...[/dim]")
+                self._clear_buffer()
+                self._send_command("!threads")
+                time.sleep(2)
+                verify_output = self._get_buffer_output()
+                console.print(f"[dim]Verification output: {verify_output[:300]}...[/dim]")
+                
+                if "Failed to load data access DLL" in verify_output or "0x80004005" in verify_output:
+                    console.print(f"[red]✗ DAC VERSION MISMATCH![/red]")
+                    console.print(f"[red]  The DAC at {settings.mscordacwks_path} does not match the CLR version in the dump.[/red]")
+                    if clr_version_match:
+                        console.print(f"[yellow]  Dump requires CLR version: {clr_version}[/yellow]")
+                    console.print(f"[yellow]  Either:[/yellow]")
+                    console.print(f"[yellow]    1. Remove MSCORDACWKS_PATH from .env to auto-download correct version[/yellow]")
+                    console.print(f"[yellow]    2. Or provide the exact DAC matching the runtime in this dump[/yellow]")
+                    console.print(f"[yellow]  Hint: Run 'lmvm clr' or 'lmvm coreclr' in WinDbg to see exact version needed[/yellow]")
+                    raise DebuggerError("DAC version mismatch - analysis cannot proceed")
+                elif "ThreadCount" in verify_output or "Thr" in verify_output or "ID" in verify_output:
+                    # !threads command produced output (thread list)
+                    console.print("[green]✓ DAC is compatible and working[/green]")
+                else:
+                    console.print(f"[yellow]⚠ DAC verification unclear - continuing with caution[/yellow]")
+            else:
+                # Auto-download DAC from symbol server
+                console.print("[cyan]→ Auto-downloading DAC from symbol server...[/cyan]")
+                self._send_command(".cordll -ve -u -l")  # Verbose, reload, download
+                time.sleep(2)
+                # Check DAC status
+                self._send_command(".cordll")
+                time.sleep(0.5)
+                output = self._get_buffer_output()
+                # Extract DAC info
+                dac_match = re.search(r'CLR DLL status:.*?([^\s]+(?:mscordacwks|mscordaccore)\.dll)', output, re.IGNORECASE | re.DOTALL)
+                if dac_match:
+                    dac_path = dac_match.group(1)
+                    console.print(f"[green]✓ Auto-downloaded DAC:[/green] {dac_path}")
+                elif 'successfully loaded' in output.lower():
+                    console.print(f"[green]✓ DAC loaded from symbol server[/green]")
+                else:
+                    console.print("[yellow]⚠ DAC status unknown - attempting to continue[/yellow]")
+                
+                # Verify auto-downloaded DAC works
+                console.print("[dim]Verifying DAC...[/dim]")
+                self._send_command("!eeversion")
+                time.sleep(1)
+                verify_output = self._get_buffer_output()
+                
+                if "Failed to load data access DLL" in verify_output or "0x80004005" in verify_output:
+                    console.print(f"[red]✗ DAC auto-download failed or version mismatch[/red]")
+                    console.print(f"[yellow]  This can happen if:[/yellow]")
+                    console.print(f"[yellow]    - Symbol server doesn't have this exact CLR version[/yellow]")
+                    console.print(f"[yellow]    - Dump is from a private/internal .NET build[/yellow]")
+                    if clr_version_match:
+                        console.print(f"[yellow]  Required CLR version: {clr_version}[/yellow]")
+                    console.print(f"[yellow]  Solution: Set MSCORDACWKS_PATH in .env to exact matching DAC[/yellow]")
+                    raise DebuggerError("DAC version mismatch - cannot analyze this dump")
+                else:
+                    console.print("[green]✓ DAC is working[/green]")
+            
+            # Load SOS extension (custom path or auto-detect)
             console.print("[dim]Loading SOS extension...[/dim]")
-            self._send_command(".loadby sos clr")
-            self._send_command(".loadby sos coreclr")
+            if settings.sos_dll_path and settings.sos_dll_path.exists():
+                # Use custom SOS.dll path for cross-version dump analysis
+                console.print(f"[cyan]→ Using custom SOS:[/cyan] {settings.sos_dll_path}")
+                self._send_command(f".load {settings.sos_dll_path}")
+                time.sleep(1)
+                # Get confirmation of which SOS loaded
+                self._send_command("lmm sos")
+                time.sleep(0.5)
+                output = self._get_buffer_output()
+                # Extract SOS path from lmm output
+                sos_match = re.search(r'sos\s+.*?\s+([^\s]+sos\.dll)', output, re.IGNORECASE)
+                if sos_match:
+                    console.print(f"[green]✓ Loaded SOS:[/green] {sos_match.group(1)}")
+            else:
+                # Auto-detect SOS from loaded runtime (try both Framework and Core)
+                self._send_command(".loadby sos clr")
+                self._send_command(".loadby sos coreclr")
+                time.sleep(1)
+                # Check which SOS was actually loaded
+                self._send_command("lmm sos")
+                time.sleep(0.5)
+                output = self._get_buffer_output()
+                # Extract SOS path from lmm output
+                sos_match = re.search(r'sos\s+.*?\s+([^\s]+sos\.dll)', output, re.IGNORECASE)
+                if sos_match:
+                    sos_path = sos_match.group(1)
+                    console.print(f"[green]✓ Auto-detected SOS:[/green] {sos_path}")
+                else:
+                    console.print("[yellow]⚠ SOS extension status unknown[/yellow]")
             
             # Wait for symbols to load
-            time.sleep(2)
+            time.sleep(1)
             self._clear_buffer()  # Clear symbol loading messages
             
             self._symbols_loaded = True
