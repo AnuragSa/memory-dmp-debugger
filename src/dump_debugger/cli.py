@@ -169,6 +169,124 @@ def setup() -> None:
     console.print(f"\n[cyan]File location:[/cyan] {env_file.absolute()}")
 
 
+@cli.command()
+@click.option(
+    "--days",
+    "-d",
+    type=int,
+    default=7,
+    help="Delete sessions older than this many days (default: 7)"
+)
+@click.option(
+    "--keep",
+    "-k",
+    type=int,
+    default=5,
+    help="Always keep this many most recent sessions (default: 5)"
+)
+def cleanup(days: int, keep: int) -> None:
+    """Clean up old analysis sessions.
+    
+    Example:
+        dump-debugger cleanup --days 7 --keep 5
+    """
+    from dump_debugger.session import SessionManager
+    from dump_debugger.config import settings
+    from pathlib import Path
+    
+    try:
+        session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
+        
+        console.print(f"[cyan]Cleaning up sessions older than {days} days (keeping {keep} most recent)...[/cyan]")
+        
+        deleted = session_manager.cleanup_old_sessions(days_old=days, keep_recent=keep)
+        
+        if deleted:
+            console.print(f"\n[green]✓ Deleted {len(deleted)} session(s):[/green]")
+            for session_id in deleted:
+                console.print(f"  - {session_id}")
+        else:
+            console.print("\n[green]✓ No sessions to clean up[/green]")
+            
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        raise click.Abort()
+
+
+@cli.command()
+@click.option(
+    "--limit",
+    "-l",
+    type=int,
+    default=20,
+    help="Maximum number of sessions to list (default: 20)"
+)
+def sessions(limit: int) -> None:
+    """List all analysis sessions.
+    
+    Example:
+        dump-debugger sessions
+        dump-debugger sessions --limit 10
+    """
+    from dump_debugger.session import SessionManager
+    from dump_debugger.config import settings
+    from pathlib import Path
+    from rich.table import Table
+    
+    try:
+        session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
+        
+        session_list = session_manager.list_sessions(limit=limit)
+        
+        if not session_list:
+            console.print("[yellow]No sessions found[/yellow]")
+            return
+        
+        # Create table
+        table = Table(title=f"Analysis Sessions (showing {len(session_list)} of {limit} max)")
+        table.add_column("Session ID", style="cyan", no_wrap=True)
+        table.add_column("Dump File", style="green")
+        table.add_column("Created", style="blue")
+        table.add_column("Last Access", style="blue")
+        table.add_column("Size", justify="right", style="yellow")
+        table.add_column("Evidence", justify="right", style="magenta")
+        
+        for session in session_list:
+            from datetime import datetime
+            
+            # Parse timestamps
+            created = session.get('created_at', '')
+            last_accessed = session.get('last_accessed', '')
+            
+            try:
+                created_dt = datetime.fromisoformat(created)
+                created_str = created_dt.strftime("%Y-%m-%d %H:%M")
+            except:
+                created_str = created[:16]
+            
+            try:
+                accessed_dt = datetime.fromisoformat(last_accessed)
+                accessed_str = accessed_dt.strftime("%Y-%m-%d %H:%M")
+            except:
+                accessed_str = last_accessed[:16]
+            
+            table.add_row(
+                session['session_id'],
+                session.get('dump_name', 'N/A'),
+                created_str,
+                accessed_str,
+                f"{session.get('size_mb', 0):.2f} MB",
+                str(session.get('evidence_count', 0))
+            )
+        
+        console.print(table)
+        console.print(f"\n[dim]Base directory: {session_manager.base_dir}[/dim]")
+        
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        raise click.Abort()
+
+
 def main() -> None:
     """Entry point for the CLI."""
     cli()

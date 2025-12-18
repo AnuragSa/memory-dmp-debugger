@@ -263,7 +263,102 @@ Save detailed session log:
 uv run dump-debugger analyze crash.dmp --issue "Memory leak" --log-output session.log
 ```
 
+### Session Management
+
+Each analysis creates an isolated session with its own directory containing:
+- Evidence database (SQLite) for large debugger outputs
+- Session metadata and logs
+- Analyzed chunks and findings
+
+List all sessions:
+```powershell
+uv run dump-debugger sessions
+```
+
+Clean up old sessions:
+```powershell
+# Delete sessions older than 7 days, keep 5 most recent
+uv run dump-debugger cleanup --days 7 --keep 5
+```
+
+**Session Isolation Benefits:**
+- Each dump analysis is completely isolated
+- Large outputs (>10KB) are automatically stored externally and analyzed in chunks
+- Evidence from past analyses doesn't contaminate current analysis
+- Session data persists for future reference
+- Sessions are automatically cleaned up based on age
+
+Sessions are stored in `.sessions/` directory by default. Each session is named with timestamp and dump file name:
+```
+.sessions/
+  └── session_20251217_143052_crash_dmp/
+      ├── evidence.db          # SQLite database with analyzed evidence
+      ├── evidence/            # Large debugger outputs
+      │   └── ev_threads_001.txt
+      ├── metadata.json        # Session info
+      └── session.log          # Full session log
+```
+
 For more examples and workflow details, see [EXPERT_QUICK_REFERENCE.md](EXPERT_QUICK_REFERENCE.md).
+
+## Evidence Management
+
+The tool automatically handles large debugger outputs to ensure accurate analysis:
+
+### Automatic Evidence Storage
+
+When a debugger command produces large output (>10KB by default):
+1. **Chunked Analysis**: Output is split into manageable chunks (8KB each)
+2. **LLM Analysis**: Each chunk is analyzed separately to extract key findings
+3. **External Storage**: Full output stored in session directory
+4. **Database Tracking**: Metadata and findings stored in SQLite
+5. **Smart Retrieval**: Semantic search finds relevant evidence for questions
+
+### Benefits
+
+- **No Token Limits**: Large call stacks, thread dumps analyzed completely
+- **Accurate Results**: No critical information lost to truncation
+- **Fast Search**: Semantic embeddings find relevant evidence quickly
+- **Session Isolation**: Evidence never crosses between different dump analyses
+
+### Configuration
+
+Adjust thresholds in `.env`:
+
+**For Azure OpenAI Embeddings (Recommended):**
+```env
+# Enable semantic search with embeddings
+USE_EMBEDDINGS=true
+EMBEDDINGS_PROVIDER=azure
+
+# Azure OpenAI embeddings deployment
+AZURE_EMBEDDINGS_DEPLOYMENT=text-embedding-3-small
+
+# Storage thresholds
+EVIDENCE_STORAGE_THRESHOLD=10000  # Store outputs larger than 10KB
+EVIDENCE_CHUNK_SIZE=8000          # Chunk size for LLM analysis
+
+# Optional: Use separate endpoint/key for embeddings
+# If not specified, uses AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY
+#AZURE_EMBEDDINGS_ENDPOINT=https://your-instance.openai.azure.com/
+#AZURE_EMBEDDINGS_API_KEY=your-embeddings-key
+```
+
+**For Standard OpenAI Embeddings:**
+```env
+# Enable semantic search with embeddings
+USE_EMBEDDINGS=true
+EMBEDDINGS_PROVIDER=openai
+EMBEDDINGS_MODEL=text-embedding-3-small
+
+# Requires OpenAI API key
+OPENAI_API_KEY=sk-...
+```
+
+**Disable Embeddings (Use Keyword Search):**
+```env
+USE_EMBEDDINGS=false
+```
 
 ## Example Output
 

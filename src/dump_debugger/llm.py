@@ -41,6 +41,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             model=settings.openai_model,
             temperature=temperature,
             api_key=settings.openai_api_key,
+            max_tokens=32768,  # Increased for Claude 4.5 capacity
             request_timeout=60,  # 60 second timeout
         )
     
@@ -52,6 +53,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             model=settings.anthropic_model,
             temperature=temperature,
             api_key=settings.anthropic_api_key,
+            max_tokens=32768,  # Increased for Claude 4.5 capacity
             timeout=60,  # 60 second timeout
         )
     
@@ -77,6 +79,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 temperature=temperature,
                 anthropic_api_key=settings.azure_openai_api_key,
                 base_url=endpoint,
+                max_tokens=32768,  # Increased for Claude 4.5 capacity
                 timeout=60,
             )
         else:
@@ -87,6 +90,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 azure_endpoint=settings.azure_openai_endpoint,
                 api_key=settings.azure_openai_api_key,
                 temperature=temperature,
+                max_tokens=32768,  # Increased for Claude 4.5 capacity
                 request_timeout=60,
             )
     

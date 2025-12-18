@@ -72,8 +72,8 @@ class Settings(BaseSettings):
         description="Maximum number of debugger iterations"
     )
     command_timeout: int = Field(
-        default=120,
-        description="Timeout for debugger commands in seconds"
+        default=600,
+        description="Timeout for debugger commands in seconds (10 minutes for slow commands like !dumpheap, ~*e !CLRStack)"
     )
     enable_data_model_commands: bool = Field(
         default=True,
@@ -96,6 +96,58 @@ class Settings(BaseSettings):
     chat_session_timeout_minutes: int = Field(
         default=30,
         description="Maximum time for interactive chat session in minutes"
+    )
+    
+    # Evidence management
+    evidence_storage_threshold: int = Field(
+        default=250000,
+        description="Size threshold for chunked analysis (250KB - matches chunk size)"
+    )
+    evidence_chunk_size: int = Field(
+        default=250000,
+        description="Chunk size for LLM analysis (250KB optimized for Claude Sonnet 4.5)"
+    )
+    chunk_analysis_delay: float = Field(
+        default=2.0,
+        description="Delay in seconds between chunk analyses to avoid rate limits (when >5 chunks)"
+    )
+    use_embeddings: bool = Field(
+        default=True,
+        description="Whether to use embeddings for semantic search (requires OpenAI or Azure OpenAI API)"
+    )
+    embeddings_provider: str = Field(
+        default="openai",
+        description="Embeddings provider: 'openai' or 'azure'"
+    )
+    embeddings_model: str = Field(
+        default="text-embedding-3-small",
+        description="Embeddings model name"
+    )
+    azure_embeddings_deployment: str | None = Field(
+        default=None,
+        description="Azure OpenAI embeddings deployment name (required if embeddings_provider=azure)"
+    )
+    azure_embeddings_endpoint: str | None = Field(
+        default=None,
+        description="Azure OpenAI embeddings endpoint (defaults to azure_openai_endpoint if not set)"
+    )
+    azure_embeddings_api_key: str | None = Field(
+        default=None,
+        description="Azure OpenAI embeddings API key (defaults to azure_openai_api_key if not set)"
+    )
+    
+    # Session management
+    sessions_base_dir: str = Field(
+        default=".sessions",
+        description="Base directory for analysis sessions"
+    )
+    session_cleanup_days: int = Field(
+        default=7,
+        description="Delete sessions older than this many days"
+    )
+    session_keep_recent: int = Field(
+        default=5,
+        description="Always keep this many most recent sessions"
     )
 
     def get_debugger_path(self, prefer_cdb: bool = True) -> Path:

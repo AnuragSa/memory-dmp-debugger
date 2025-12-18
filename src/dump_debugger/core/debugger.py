@@ -23,12 +23,13 @@ class DebuggerError(Exception):
 class DebuggerWrapper:
     """Wrapper for automating WinDbg/CDB commands."""
 
-    def __init__(self, dump_path: Path, show_output: bool = False):
+    def __init__(self, dump_path: Path, show_output: bool = False, session_dir: Path = None):
         """Initialize the debugger wrapper.
         
         Args:
             dump_path: Path to the memory dump file
             show_output: Whether to show command outputs (default: False)
+            session_dir: Session directory for evidence storage (optional)
         """
         self.dump_path = dump_path
         self.symbol_path = settings.symbol_path
@@ -39,6 +40,22 @@ class DebuggerWrapper:
         self._output_lock = threading.Lock()
         self._reader_thread = None
         self._command_delimiter = f"===COMMAND_COMPLETE_{id(self)}==="
+        
+        # Evidence management
+        self.session_dir = session_dir
+        self.evidence_store = None
+        self.evidence_analyzer = None
+        self.embeddings_client = None
+        if session_dir:
+            from dump_debugger.evidence import EvidenceStore, EvidenceAnalyzer
+            from dump_debugger.llm import get_llm
+            
+            self.evidence_store = EvidenceStore(session_dir)
+            self.evidence_analyzer = EvidenceAnalyzer(get_llm())
+            
+            # Initialize embeddings client if enabled
+            if settings.use_embeddings:
+                self.embeddings_client = self._init_embeddings_client()
 
         if not self.dump_path.exists():
             raise FileNotFoundError(f"Dump file not found: {dump_path}")
@@ -70,6 +87,41 @@ class DebuggerWrapper:
         
         # Start the persistent debugger session
         self._start_session()
+    
+    def _init_embeddings_client(self):
+        """Initialize embeddings client based on configuration.
+        
+        Returns:
+            OpenAI or AzureOpenAI client for embeddings
+        """
+        try:
+            if settings.embeddings_provider == "azure":
+                from openai import AzureOpenAI
+                
+                # Use embeddings-specific config or fall back to main Azure config
+                endpoint = settings.azure_embeddings_endpoint or settings.azure_openai_endpoint
+                api_key = settings.azure_embeddings_api_key or settings.azure_openai_api_key
+                
+                if not endpoint or not api_key:
+                    console.print("[yellow]Azure OpenAI embeddings not configured, semantic search disabled[/yellow]")
+                    return None
+                
+                return AzureOpenAI(
+                    api_key=api_key,
+                    api_version=settings.azure_openai_api_version,
+                    azure_endpoint=endpoint
+                )
+            else:
+                from openai import OpenAI
+                
+                if not settings.openai_api_key:
+                    console.print("[yellow]OpenAI API key not set, semantic search disabled[/yellow]")
+                    return None
+                
+                return OpenAI(api_key=settings.openai_api_key)
+        except Exception as e:
+            console.print(f"[yellow]Failed to initialize embeddings client: {e}[/yellow]")
+            return None
     
     def _ensure_symbol_cache(self) -> None:
         """Ensure symbol cache directory exists."""
@@ -344,6 +396,28 @@ class DebuggerWrapper:
         command_stripped = command.strip()
 
         try:
+            # Check cache first - dumps are static, commands return same output
+            if self.evidence_store:
+                cached_evidence_id = self.evidence_store.find_by_command(command_stripped)
+                if cached_evidence_id:
+                    # Return cached result without executing
+                    try:
+                        output = self.evidence_store.retrieve_evidence(cached_evidence_id)
+                        if self.show_output:
+                            console.print(f"[dim]✓ Using cached result {cached_evidence_id}[/dim]")
+                        return {
+                            "command": command,
+                            "output": output,
+                            "parsed": self._parse_output(command, output),
+                            "success": True,
+                            "error": None,
+                            "cached": True,
+                            "evidence_id": cached_evidence_id
+                        }
+                    except Exception as e:
+                        # Cache retrieval failed, fall through to execute
+                        console.print(f"[yellow]⚠ Cache retrieval failed: {e}, executing command[/yellow]")
+            
             if not self._process or self._process.poll() is not None:
                 raise DebuggerError("Debugger session is not running")
 
@@ -420,26 +494,41 @@ class DebuggerWrapper:
                 
             success = error is None
             
-            # Only truncate extremely large outputs (>500KB) to prevent context overflow
-            MAX_OUTPUT_SIZE = 500000  # ~500KB limit per command (very generous)
-            if len(output) > MAX_OUTPUT_SIZE:
-                keep_size = MAX_OUTPUT_SIZE // 2
-                truncated_output = (
-                    output[:keep_size] + 
-                    f"\n\n... [WARNING: Output truncated - {len(output) - MAX_OUTPUT_SIZE} bytes removed] ..." +
-                    f"\n... Use filtered queries (dx with .Where/.Select/.Take or specific thread IDs) to get focused data ...\n\n" +
-                    output[-keep_size:]
+            # Store result in evidence cache for future reuse
+            if success and self.evidence_store and output:
+                # Generate embedding for semantic search (even for small outputs)
+                embedding = None
+                if self.embeddings_client and output:
+                    try:
+                        # Use truncated output for embedding (embeddings have token limits)
+                        embedding_text = output[:8000] if len(output) > 8000 else output
+                        embedding_response = self.embeddings_client.embeddings.create(
+                            input=embedding_text,
+                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
+                        )
+                        embedding = embedding_response.data[0].embedding
+                    except Exception as e:
+                        if self.show_output:
+                            console.print(f"[yellow]⚠ Embedding generation failed: {e}[/yellow]")
+                
+                # Store with embedding (analysis added later if needed)
+                evidence_id = self.evidence_store.store_evidence(
+                    command=command_stripped,
+                    output=output,
+                    summary=None,  # Analysis happens in execute_command_with_analysis for large outputs
+                    key_findings=None,
+                    embedding=embedding
                 )
-                console.print(f"[yellow]⚠ Output too large ({len(output)} bytes). Truncated to {len(truncated_output)} bytes.[/yellow]")
-                console.print(f"[yellow]   Consider using filtered queries for more targeted results.[/yellow]")
-                output = truncated_output
+                if self.show_output and len(output) > 10000:
+                    console.print(f"[dim]Cached as {evidence_id}[/dim]")
 
             return {
                 "command": command,
                 "output": output,
                 "parsed": self._parse_output(command, output),
                 "success": success,
-                "error": error
+                "error": error,
+                "cached": False
             }
 
         except Exception as e:
@@ -450,6 +539,153 @@ class DebuggerWrapper:
                 "success": False,
                 "error": f"Failed to execute command: {str(e)}"
             }
+    
+    def execute_command_with_analysis(
+        self,
+        command: str,
+        intent: str = "",
+        timeout: int | None = None
+    ) -> dict[str, Any]:
+        """Execute command and automatically use evidence storage for large outputs.
+        
+        Args:
+            command: Debugger command to execute
+            intent: What we're looking for (for analysis)
+            timeout: Timeout in seconds
+            
+        Returns:
+            Dictionary with result, evidence_id (if stored), and analysis
+        """
+        result = self.execute_command(command, timeout)
+        
+        if not result['success'] or not self.evidence_store:
+            return result
+        
+        output = result['output']
+        output_size = len(output)
+        threshold = settings.evidence_storage_threshold
+        
+        # Check if command was served from cache
+        if result.get('cached'):
+            # Already cached, check if it has analysis
+            evidence_id = result.get('evidence_id')
+            metadata = self.evidence_store.get_metadata(evidence_id)
+            
+            if metadata.get('summary'):
+                # Has analysis, return it
+                console.print(f"[dim]Using cached analysis from {evidence_id}[/dim]")
+                result['evidence_type'] = 'external'
+                result['evidence_id'] = evidence_id
+                result['analysis'] = {
+                    'summary': metadata.get('summary', ''),
+                    'key_findings': metadata.get('key_findings', [])
+                }
+                result['output'] = metadata.get('summary', output)
+                return result
+            # else: no analysis yet, fall through to analyze
+        
+        # For large outputs, perform chunked analysis
+        if output_size > threshold:
+            # Check for session-wide duplicate (dumps are static, cache indefinitely)
+            existing_evidence_id = self.evidence_store.find_recent_duplicate(
+                command=command,
+                output=output,
+                max_age_seconds=None  # Session-wide cache for dump analysis
+            )
+            
+            if existing_evidence_id:
+                console.print(f"[dim]Reusing recent evidence {existing_evidence_id} (identical output)[/dim]")
+                
+                # Retrieve existing analysis
+                metadata = self.evidence_store.get_metadata(existing_evidence_id)
+                
+                # Check if we have a summary - if not, need to analyze now
+                if metadata.get('summary'):
+                    # Has analysis, return it
+                    result['evidence_type'] = 'external'
+                    result['evidence_id'] = existing_evidence_id
+                    result['analysis'] = {
+                        'summary': metadata.get('summary', ''),
+                        'key_findings': metadata.get('key_findings', [])
+                    }
+                    result['output_truncated'] = True
+                    result['output'] = metadata.get('summary')
+                    result['cached'] = True  # Mark as cached for display
+                    
+                    return result
+                else:
+                    # No analysis yet - fall through to analyze the output
+                    console.print(f"[dim]Evidence {existing_evidence_id} has no analysis yet, analyzing now...[/dim]")
+                    # Continue to analysis section below
+            
+            console.print(f"[dim]Output size {output_size} bytes exceeds threshold ({threshold}), analyzing...[/dim]")
+            
+            # Analyze the output
+            analysis = self.evidence_analyzer.analyze_evidence(
+                command=command,
+                output=output,
+                intent=intent or f"Analyzing {command}",
+                chunk_size=settings.evidence_chunk_size
+            )
+            
+            # Generate embedding from summary for better semantic search
+            embedding = None
+            if self.embeddings_client and analysis.get('summary'):
+                try:
+                    embedding_response = self.embeddings_client.embeddings.create(
+                        input=analysis['summary'],
+                        model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
+                    )
+                    embedding = embedding_response.data[0].embedding
+                except Exception as e:
+                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            
+            # Update existing evidence with analysis or create new if not cached
+            if result.get('cached') or existing_evidence_id:
+                # Update existing evidence with analysis
+                evidence_id = result.get('evidence_id') or existing_evidence_id
+                self.evidence_store.conn.execute("""
+                    UPDATE evidence 
+                    SET summary = ?, key_findings = ?, embedding = ?
+                    WHERE id = ?
+                """, [
+                    analysis['summary'],
+                    json.dumps(analysis['key_findings']),
+                    json.dumps(embedding) if embedding else None,
+                    evidence_id
+                ])
+                self.evidence_store.conn.commit()
+                console.print(f"[dim]Updated {evidence_id} with analysis[/dim]")
+            else:
+                # Store new evidence with analysis
+                evidence_id = self.evidence_store.store_evidence(
+                    command=command,
+                    output=output,
+                    summary=analysis['summary'],
+                    key_findings=analysis['key_findings'],
+                    embedding=embedding
+                )
+            
+            # Store chunk analyses
+            if 'chunks' in analysis:
+                self.evidence_store.store_chunks(evidence_id, analysis['chunks'])
+            
+            # Update result with evidence info
+            result['evidence_type'] = 'external'
+            result['evidence_id'] = evidence_id
+            result['analysis'] = analysis
+            result['output_truncated'] = True
+            # Keep only summary in output to save tokens
+            result['output'] = analysis['summary']
+            
+            console.print(f"[green]✓[/green] Analyzed and stored as evidence {evidence_id}")
+        else:
+            result['evidence_type'] = 'inline'
+            result['evidence_id'] = None
+            result['analysis'] = None
+            result['output_truncated'] = False
+        
+        return result
 
     def _parse_output(self, command: str, output: str) -> Any:
         """Parse debugger output based on command type.

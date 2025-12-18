@@ -8,10 +8,14 @@ from langgraph.graph import add_messages
 class Evidence(TypedDict):
     """A single piece of evidence collected during investigation."""
     command: str  # Command that generated this evidence
-    output: str  # Raw command output
+    output: str  # Raw command output (may be truncated if stored externally)
     finding: str  # What was discovered
     significance: str  # Why it matters
     confidence: str  # "high", "medium", or "low"
+    # External storage fields (for large outputs)
+    evidence_type: str  # "inline" or "external"
+    evidence_id: str | None  # ID in evidence store (if external)
+    summary: str | None  # Summary of findings (from analyzer)
 
 
 class HypothesisTest(TypedDict):
@@ -51,6 +55,9 @@ class AnalysisState(TypedDict):
     issue_description: str
     dump_type: str  # "user" or "kernel"
     supports_dx: bool  # Whether data model commands are available
+    
+    # Session management (NEW - for evidence isolation)
+    session_dir: str  # Path to session directory for this analysis
     
     # Hypothesis phase (NEW - expert-level thinking)
     current_hypothesis: str  # Current hypothesis being tested

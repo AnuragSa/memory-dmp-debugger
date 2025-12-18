@@ -107,22 +107,43 @@ Return ONLY valid JSON in this exact format:
             command = lines[0].strip()
             console.print(f"  [dim]→ {command} (fallback extraction)[/dim]")
         
-        # Execute command
-        result = self.debugger.execute_command(command)
+        # Execute command with evidence analysis
+        result = self.debugger.execute_command_with_analysis(
+            command=command,
+            intent=f"Investigating: {task}"
+        )
         
         # Extract output properly (it's a dict!)
         if isinstance(result, dict):
             output_str = result.get('output', '')
+            evidence_type = result.get('evidence_type', 'inline')
+            evidence_id = result.get('evidence_id')
+            analysis = result.get('analysis')
         else:
             output_str = str(result)
+            evidence_type = 'inline'
+            evidence_id = None
+            analysis = None
         
-        # Create evidence
+        # Create evidence entry
+        # For external evidence, output_str is already the summary (set by execute_command_with_analysis)
+        # For inline evidence, truncate if needed to save memory
+        if evidence_type == 'external':
+            # Already a summary, use as-is
+            output_for_state = output_str
+        else:
+            # Inline evidence - truncate to reasonable size for state
+            output_for_state = output_str[:20000] if len(output_str) > 20000 else output_str
+        
         evidence: Evidence = {
             'command': command,
-            'output': output_str[:20000] if len(output_str) > 20000 else output_str,  # Store up to 20K chars
+            'output': output_for_state,
             'finding': f"Executed for task: {task}",
             'significance': "Investigating confirmed hypothesis",
-            'confidence': 'medium'
+            'confidence': 'medium',
+            'evidence_type': evidence_type,
+            'evidence_id': evidence_id,
+            'summary': analysis.get('summary') if analysis else None
         }
         
         # Update evidence inventory
@@ -186,10 +207,10 @@ class ReasonerAgent:
         
         console.print(f"[dim]Analyzing {total_evidence} pieces of evidence...[/dim]")
         
-        # Build evidence summary with smart truncation
+        # Build evidence summary for reasoning
         evidence_summary = []
         total_chars = 0
-        MAX_TOTAL = 100000  # ~25K tokens for reasoning
+        MAX_TOTAL = 800000  # ~200K tokens for Claude Sonnet 4.5
         
         for task, evidence_list in evidence_inventory.items():
             if total_chars >= MAX_TOTAL:
@@ -199,21 +220,17 @@ class ReasonerAgent:
             evidence_summary.append(f"\n**Task: {task}**")
             for e in evidence_list:
                 cmd = e.get('command', 'unknown')
-                output = e.get('output', '')
                 
-                # Smart truncation based on size
-                if len(output) <= 5000:
-                    output_preview = output
-                elif len(output) <= 20000:
-                    # Head + tail for medium outputs
-                    output_preview = f"{output[:2500]}\n\n[... {len(output) - 5000} chars omitted ...]\n\n{output[-2500:]}"
+                # Check if this is external evidence with analysis
+                if e.get('evidence_type') == 'external' and e.get('summary'):
+                    # Use the analyzed summary instead of truncated raw output
+                    output_preview = f"[Large output analyzed and stored externally]\nSummary: {e.get('summary')}"
+                    if e.get('evidence_id'):
+                        output_preview += f"\nEvidence ID: {e.get('evidence_id')}"
                 else:
-                    # Head + middle + tail for large outputs
-                    head = output[:2000]
-                    middle_start = len(output) // 2 - 1000
-                    middle = output[middle_start:middle_start + 2000]
-                    tail = output[-2000:]
-                    output_preview = f"{head}\n\n[... section omitted ...]\n\n{middle}\n\n[... section omitted ...]\n\n{tail}"
+                    # Inline evidence - include fully (Claude 4.5 handles large contexts)
+                    output = e.get('output', '')
+                    output_preview = output  # No truncation needed with large context window
                 
                 entry = f"- Command: {cmd}\n  Output: {output_preview}"
                 if total_chars + len(entry) > MAX_TOTAL:
@@ -394,10 +411,10 @@ class ReportWriterAgentV2:
         
         test_history_text = "\n".join(test_history)
         
-        # Build evidence summary with smart truncation for comprehensive reporting
+        # Build evidence summary for comprehensive reporting
         evidence_summary = []
         total_chars = 0
-        MAX_TOTAL = 120000  # ~30K tokens for final report
+        MAX_TOTAL = 800000  # ~200K tokens for Claude Sonnet 4.5
         
         for task, evidence_list in evidence.items():
             if total_chars >= MAX_TOTAL:
@@ -407,15 +424,20 @@ class ReportWriterAgentV2:
             evidence_summary.append(f"\n**{task}:**")
             for e in evidence_list:
                 cmd = e.get('command', 'unknown')
-                output = e.get('output', '')
                 finding = e.get('finding', '')
                 
-                # Include command and smart output preview
-                if len(output) <= 3000:
-                    output_preview = output
+                # Check if this is external evidence with analysis
+                if e.get('evidence_type') == 'external' and e.get('summary'):
+                    # Use analyzed summary for external evidence
+                    output_preview = f"[Analyzed externally]\n{e.get('summary')}"
                 else:
-                    # Show head + tail for context
-                    output_preview = f"{output[:1500]}\n[... {len(output) - 3000} chars ...]\n{output[-1500:]}"
+                    # Include command and smart output preview for inline evidence
+                    output = e.get('output', '')
+                    if len(output) <= 3000:
+                        output_preview = output
+                    else:
+                        # Show head + tail for context
+                        output_preview = f"{output[:1500]}\n[... {len(output) - 3000} chars ...]\n{output[-1500:]}"
                 
                 entry = f"- Command: {cmd}\n  Output: {output_preview}"
                 if finding:
@@ -700,19 +722,20 @@ def handle_special_command(command: str, state: AnalysisState) -> dict:
         return {}
 
 
-def create_expert_workflow(dump_path: Path) -> StateGraph:
+def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     """Create expert-level hypothesis-driven workflow.
     
     Flow: Hypothesis → Test → [Confirmed: Investigate | Rejected: New Hypothesis] → Reason → Report
     
     Args:
         dump_path: Path to the memory dump file
+        session_dir: Session directory for evidence storage
         
     Returns:
         Configured StateGraph
     """
-    # Initialize agents
-    debugger = DebuggerWrapper(dump_path)
+    # Initialize agents with session directory
+    debugger = DebuggerWrapper(dump_path, session_dir=session_dir)
     hypothesis_agent = HypothesisDrivenAgent(debugger)
     planner = PlannerAgentV2()
     investigator = InvestigatorAgent(debugger)
@@ -1017,10 +1040,18 @@ def run_analysis(
     """
     global _log_file_handle, _original_stdout
     
-    # Set up logging
+    # Create session directory for this analysis
+    from dump_debugger.session import SessionManager
+    
+    session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
+    session_dir = session_manager.create_session(dump_path)
+    
+    console.print(f"[dim]Session: {session_dir.name}[/dim]")
+    
+    # Set up logging to session directory
     if log_to_file:
-        log_path = Path.cwd() / "session.log"
-        console.print(f"[dim]Logging console output to: {log_path.name}[/dim]")
+        log_path = session_dir / "session.log"
+        console.print(f"[dim]Logging to: {log_path}[/dim]")
         _log_file_handle = open(log_path, 'w', encoding='utf-8')
         _original_stdout = sys.stdout
         sys.stdout = TeeOutput(_original_stdout, _log_file_handle)
@@ -1040,6 +1071,9 @@ def run_analysis(
             'issue_description': issue_description,
             'dump_type': dump_type,
             'supports_dx': dump_type == 'user',
+            
+            # Session management
+            'session_dir': str(session_dir),
             
             # Hypothesis tracking
             'current_hypothesis': '',
@@ -1083,7 +1117,7 @@ def run_analysis(
         }
         
         # Create and run workflow
-        workflow = create_expert_workflow(dump_path)
+        workflow = create_expert_workflow(dump_path, session_dir)
         app = workflow.compile()
         
         console.print("\n[bold cyan]🧠 Starting Expert Analysis (Hypothesis-Driven)[/bold cyan]\n")
@@ -1098,6 +1132,11 @@ def run_analysis(
         
         report = final_state.get('final_report', 'No report generated')
         console.print(report)
+        
+        # Update session access time
+        session_manager.update_access_time(session_dir)
+        
+        console.print(f"\n[dim]Session data saved to: {session_dir}[/dim]")
         
         return report
         
