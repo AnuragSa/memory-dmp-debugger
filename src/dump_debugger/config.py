@@ -97,6 +97,10 @@ class Settings(BaseSettings):
         default=30,
         description="Maximum time for interactive chat session in minutes"
     )
+    graph_recursion_limit: int = Field(
+        default=200,
+        description="LangGraph recursion limit - max graph iterations (each chat question counts as 1)"
+    )
     
     # Evidence management
     evidence_storage_threshold: int = Field(

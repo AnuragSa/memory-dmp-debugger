@@ -848,7 +848,8 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             return {'chat_active': False}
         if not user_input:
             console.print("[dim]Please enter a question or /exit to quit[/dim]")
-            return {'chat_history': state.get('chat_history', [])}  # No changes to state
+            # Return chat_active to keep the loop going
+            return {'chat_active': True}
         
         # Handle special commands
         if user_input.startswith('/'):
@@ -860,7 +861,7 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             return result
         except KeyboardInterrupt:
             console.print("\n[yellow]Operation cancelled. Type /exit to quit or ask another question.[/yellow]")
-            return {'chat_history': state.get('chat_history', [])}  # No changes
+            return {'chat_active': True}  # Keep chat active
         except Exception as e:
             console.print(f"\n[red]Error processing question: {e}[/red]")
             console.print("[yellow]Exiting interactive mode due to error. Please restart if needed.[/yellow]")
@@ -1122,8 +1123,12 @@ def run_analysis(
         
         console.print("\n[bold cyan]🧠 Starting Expert Analysis (Hypothesis-Driven)[/bold cyan]\n")
         
-        # Run the workflow
-        final_state = app.invoke(initial_state)
+        # Run the workflow with increased recursion limit for interactive chat sessions
+        # Each user question in chat mode counts as a graph iteration
+        final_state = app.invoke(
+            initial_state,
+            config={"recursion_limit": settings.graph_recursion_limit}
+        )
         
         # Display report
         console.print("\n[bold green]═══════════════════════════════════════════════════[/bold green]")
