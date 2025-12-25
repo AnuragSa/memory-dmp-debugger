@@ -584,7 +584,18 @@ class DebuggerWrapper:
                 return result
             # else: no analysis yet, fall through to analyze
         
-        # For large outputs, perform chunked analysis
+        # ALWAYS analyze command output using specialized analyzers (regardless of size)
+        # Only use external storage if output exceeds threshold
+        console.print(f"[dim]Analyzing command output ({output_size} bytes)...[/dim]")
+        
+        analysis = self.evidence_analyzer.analyze_evidence(
+            command=command,
+            output=output,
+            intent=intent or f"Analyzing {command}",
+            chunk_size=settings.evidence_chunk_size
+        )
+        
+        # For large outputs (> threshold), store externally and use summary
         if output_size > threshold:
             # Check for session-wide duplicate (dumps are static, cache indefinitely)
             existing_evidence_id = self.evidence_store.find_recent_duplicate(
@@ -618,15 +629,7 @@ class DebuggerWrapper:
                     console.print(f"[dim]Evidence {existing_evidence_id} has no analysis yet, analyzing now...[/dim]")
                     # Continue to analysis section below
             
-            console.print(f"[dim]Output size {output_size} bytes exceeds threshold ({threshold}), analyzing...[/dim]")
-            
-            # Analyze the output
-            analysis = self.evidence_analyzer.analyze_evidence(
-                command=command,
-                output=output,
-                intent=intent or f"Analyzing {command}",
-                chunk_size=settings.evidence_chunk_size
-            )
+            console.print(f"[dim]Output size {output_size} bytes exceeds threshold ({threshold}), storing externally...[/dim]")
             
             # Generate embedding from summary for better semantic search
             embedding = None
@@ -679,13 +682,16 @@ class DebuggerWrapper:
             result['output'] = analysis['summary']
             
             console.print(f"[green]✓[/green] Analyzed and stored as evidence {evidence_id}")
+            return result
         else:
+            # Small output - return analysis inline (no external storage)
             result['evidence_type'] = 'inline'
-            result['evidence_id'] = None
-            result['analysis'] = None
-            result['output_truncated'] = False
-        
-        return result
+            result['analysis'] = {
+                'summary': analysis.get('summary', ''),
+                'key_findings': analysis.get('key_findings', [])
+            }
+            # Keep original output for inline evidence
+            return result
 
     def _parse_output(self, command: str, output: str) -> Any:
         """Parse debugger output based on command type.

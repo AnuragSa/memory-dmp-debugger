@@ -10,6 +10,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from rich.console import Console
 
 from dump_debugger.config import settings
+from dump_debugger.analyzers import get_analyzer, analyzer_registry
+from dump_debugger.analyzer_stats import usage_tracker
 
 console = Console()
 
@@ -34,6 +36,8 @@ class EvidenceAnalyzer:
     ) -> dict:
         """Analyze output in chunks, tracking intent and findings.
         
+        First tries specialized analyzer if available, then falls back to generic analysis.
+        
         Args:
             command: Debugger command
             output: Command output
@@ -43,6 +47,100 @@ class EvidenceAnalyzer:
         Returns:
             Analysis dictionary with summary, findings, and trail
         """
+        # Try specialized analyzer first
+        specialized_analyzer = get_analyzer(command)
+        start_time = time.time()
+        
+        if specialized_analyzer:
+            console.print(f"[dim]Using specialized {specialized_analyzer.name} analyzer ({specialized_analyzer.tier.value})...[/dim]")
+            try:
+                result = specialized_analyzer.analyze(command, output)
+                analysis_time_ms = (time.time() - start_time) * 1000
+                
+                # Record usage
+                usage_tracker.record(
+                    command=command,
+                    analyzer_name=specialized_analyzer.name,
+                    tier=specialized_analyzer.tier.value,
+                    success=result.success,
+                    analysis_time_ms=analysis_time_ms
+                )
+                
+                if result.success:
+                    return {
+                        'summary': result.summary,
+                        'key_findings': result.findings,
+                        'blocking_operations': result.structured_data.get('blocking_operations', []),
+                        'thread_states': result.structured_data.get('thread_states', []),
+                        'analysis_trail': {
+                            'intent': intent,
+                            'command': command,
+                            'output_size': len(output),
+                            'analyzer': specialized_analyzer.name,
+                            'tier': specialized_analyzer.tier.value,
+                            'metadata': result.metadata,
+                            'analysis_time_ms': analysis_time_ms,
+                        },
+                        'structured_data': result.structured_data,
+                        'chunks': [(1, output, result.to_dict())]  # Single "chunk" for compatibility
+                    }
+                else:
+                    console.print(f"[yellow]Specialized analyzer failed: {result.error}, falling back to generic analysis[/yellow]")
+            except Exception as e:
+                analysis_time_ms = (time.time() - start_time) * 1000
+                usage_tracker.record(
+                    command=command,
+                    analyzer_name=specialized_analyzer.name,
+                    tier=specialized_analyzer.tier.value,
+                    success=False,
+                    analysis_time_ms=analysis_time_ms
+                )
+                console.print(f"[yellow]Specialized analyzer error: {e}, falling back to generic analysis[/yellow]")
+        
+        # Record generic analysis - check if we missed an available analyzer
+        analysis_time_ms = (time.time() - start_time) * 1000
+        
+        # Check if any analyzer could have handled this command (debugging)
+        missed_analyzer = None
+        for analyzer_info in analyzer_registry.list_analyzers():
+            # Try to get the analyzer instance to test can_analyze
+            from dump_debugger.analyzers import (
+                ThreadsAnalyzer, SyncBlockAnalyzer, ThreadPoolAnalyzer,
+                FinalizeQueueAnalyzer, EEHeapAnalyzer, DumpHeapAnalyzer,
+                GCHandlesAnalyzer, CLRStackAnalyzer
+            )
+            analyzer_map = {
+                "threads": ThreadsAnalyzer,
+                "syncblk": SyncBlockAnalyzer,
+                "threadpool": ThreadPoolAnalyzer,
+                "finalizequeue": FinalizeQueueAnalyzer,
+                "eeheap": EEHeapAnalyzer,
+                "dumpheap": DumpHeapAnalyzer,
+                "gchandles": GCHandlesAnalyzer,
+                "clrstack": CLRStackAnalyzer,
+            }
+            
+            if analyzer_info["name"] in analyzer_map:
+                try:
+                    temp_analyzer = analyzer_map[analyzer_info["name"]]()
+                    if temp_analyzer.can_analyze(command):
+                        missed_analyzer = analyzer_info["name"]
+                        console.print(f"[red]⚠️ WARNING: {analyzer_info['name']} analyzer exists but wasn't matched![/red]")
+                        break
+                except:
+                    pass
+        
+        usage_tracker.record(
+            command=command,
+            analyzer_name=None,
+            tier=None,
+            success=True,  # Will be updated if fails
+            analysis_time_ms=analysis_time_ms,
+            missed_opportunity=missed_analyzer is not None,
+            available_analyzer=missed_analyzer
+        )
+        
+        # Fall back to generic chunk-based analysis
         analysis_trail = {
             'intent': intent,
             'command': command,

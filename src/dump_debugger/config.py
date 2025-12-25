@@ -42,6 +42,34 @@ class Settings(BaseSettings):
         default="2024-02-15-preview",
         description="Azure API version"
     )
+    
+    # Local LLM Configuration (Ollama)
+    use_local_llm: bool = Field(
+        default=False,
+        description="Enable local LLM support via Ollama"
+    )
+    local_llm_base_url: str = Field(
+        default="http://localhost:11434",
+        description="Ollama API endpoint"
+    )
+    local_llm_model: str = Field(
+        default="llama3.1:14b",
+        description="Local LLM model name (e.g., llama3.1:14b, mistral:7b)"
+    )
+    local_llm_timeout: int = Field(
+        default=120,
+        description="Timeout for local LLM requests in seconds"
+    )
+    
+    # Tiered LLM Strategy
+    use_tiered_llm: bool = Field(
+        default=False,
+        description="Enable tiered LLM routing (local for simple, cloud for complex)"
+    )
+    cloud_llm_provider: Literal["openai", "anthropic", "azure"] = Field(
+        default="azure",
+        description="Cloud LLM provider for complex tasks"
+    )
 
     # Debugger Configuration
     cdb_path: Path = Field(

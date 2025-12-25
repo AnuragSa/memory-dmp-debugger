@@ -6,6 +6,8 @@ from anthropic import AnthropicFoundry
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_ollama import OllamaLLM
+from rich.console import Console
 
 try:
     from azure.ai.inference import ChatCompletionsClient
@@ -18,6 +20,11 @@ except ImportError:
 
 from dump_debugger.config import settings
 
+console = Console()
+
+# LLM instance cache to avoid creating duplicates
+_llm_cache: dict[str, BaseChatModel] = {}
+
 
 def get_llm(temperature: float = 0.0) -> BaseChatModel:
     """Get the configured LLM instance.
@@ -26,36 +33,57 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
         temperature: Model temperature (0.0 for deterministic, higher for creative)
         
     Returns:
-        Configured LLM instance
+        Configured LLM instance (cached to avoid duplicates)
         
     Raises:
         ValueError: If provider is not configured or invalid
     """
     provider = settings.llm_provider.lower()
     
+    # Check cache first (key includes provider, model, and temperature)
+    cache_key = f"{provider}:{temperature}"
+    if provider == "ollama":
+        cache_key = f"ollama:{settings.local_llm_model}:{temperature}"
+    elif provider == "azure":
+        cache_key = f"azure:{settings.azure_openai_deployment}:{temperature}"
+    elif provider == "openai":
+        cache_key = f"openai:{settings.openai_model}:{temperature}"
+    elif provider == "anthropic":
+        cache_key = f"anthropic:{settings.anthropic_model}:{temperature}"
+    
+    if cache_key in _llm_cache:
+        console.print(f"[dim]♻️ Reusing cached LLM: {provider}[/dim]")
+        return _llm_cache[cache_key]
+    
     if provider == "openai":
         if not settings.openai_api_key:
             raise ValueError("OpenAI API key not configured. Set OPENAI_API_KEY in .env")
         
-        return ChatOpenAI(
+        console.print(f"[dim]🤖 Creating LLM: OpenAI ({settings.openai_model})[/dim]")
+        llm = ChatOpenAI(
             model=settings.openai_model,
             temperature=temperature,
             api_key=settings.openai_api_key,
             max_tokens=32768,  # Increased for Claude 4.5 capacity
             request_timeout=60,  # 60 second timeout
         )
+        _llm_cache[cache_key] = llm
+        return llm
     
     elif provider == "anthropic":
         if not settings.anthropic_api_key:
             raise ValueError("Anthropic API key not configured. Set ANTHROPIC_API_KEY in .env")
         
-        return ChatAnthropic(
+        console.print(f"[dim]🤖 Creating LLM: Anthropic ({settings.anthropic_model})[/dim]")
+        llm = ChatAnthropic(
             model=settings.anthropic_model,
             temperature=temperature,
             api_key=settings.anthropic_api_key,
             max_tokens=32768,  # Increased for Claude 4.5 capacity
             timeout=60,  # 60 second timeout
         )
+        _llm_cache[cache_key] = llm
+        return llm
     
     elif provider == "azure":
         if not settings.azure_openai_api_key or not settings.azure_openai_endpoint:
@@ -69,12 +97,13 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
         
         if "services.ai.azure.com" in endpoint.lower():
             # This is Azure AI Foundry - use AnthropicFoundry client
+            console.print(f"[dim]☁️ Creating LLM: Azure AI Foundry ({settings.azure_openai_deployment or 'claude-3-5-sonnet'})[/dim]")
             client = AnthropicFoundry(
                 api_key=settings.azure_openai_api_key,
                 base_url=endpoint
             )
             # Wrap in ChatAnthropic using the custom client
-            return ChatAnthropic(
+            llm = ChatAnthropic(
                 model=settings.azure_openai_deployment or "claude-3-5-sonnet",
                 temperature=temperature,
                 anthropic_api_key=settings.azure_openai_api_key,
@@ -82,9 +111,12 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 max_tokens=32768,  # Increased for Claude 4.5 capacity
                 timeout=60,
             )
+            _llm_cache[cache_key] = llm
+            return llm
         else:
             # This is Azure OpenAI (standard OpenAI API format)
-            return AzureChatOpenAI(
+            console.print(f"[dim]☁️ Creating LLM: Azure OpenAI ({settings.azure_openai_deployment})[/dim]")
+            llm = AzureChatOpenAI(
                 azure_deployment=settings.azure_openai_deployment,
                 api_version=settings.azure_openai_api_version,
                 azure_endpoint=settings.azure_openai_endpoint,
@@ -93,11 +125,27 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 max_tokens=32768,  # Increased for Claude 4.5 capacity
                 request_timeout=60,
             )
+            _llm_cache[cache_key] = llm
+            return llm
+    
+    elif provider == "ollama":
+        if not settings.use_local_llm:
+            raise ValueError("Ollama not enabled. Set USE_LOCAL_LLM=true in .env")
+        
+        console.print(f"[dim]🤖 Creating LLM: Ollama ({settings.local_llm_model})[/dim]")
+        llm = OllamaLLM(
+            model=settings.local_llm_model,
+            base_url=settings.local_llm_base_url,
+            temperature=temperature,
+            timeout=settings.local_llm_timeout,
+        )
+        _llm_cache[cache_key] = llm
+        return llm
     
     else:
         raise ValueError(
             f"Invalid LLM provider: {provider}. "
-            "Choose from: openai, anthropic, azure"
+            "Choose from: openai, anthropic, azure, ollama"
         )
 
 

@@ -13,6 +13,7 @@ from dump_debugger.hypothesis_agent import HypothesisDrivenAgent
 from dump_debugger.interactive_agent import InteractiveChatAgent
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, Evidence, InvestigatorOutput, ReasonerOutput
+from dump_debugger.analyzer_stats import usage_tracker
 
 console = Console()
 
@@ -1137,6 +1138,10 @@ def run_analysis(
         
         report = final_state.get('final_report', 'No report generated')
         console.print(report)
+        
+        # Display analyzer usage statistics
+        console.print("\n")
+        usage_tracker.print_summary()
         
         # Update session access time
         session_manager.update_access_time(session_dir)
