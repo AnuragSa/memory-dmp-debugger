@@ -2,15 +2,21 @@
 
 An AI-powered memory dump analyzer that uses hypothesis-driven investigation with LangGraph and WinDbg to automatically diagnose crashes, hangs, and memory issues.
 
+## Documentation
+
+- Setup and configuration: `docs/SETUP.md`
+- Architecture overview: `docs/ARCHITECTURE.md`
+
 ## Features
 
-- 🧠 **Hypothesis-Driven Analysis**: Forms and tests hypotheses like an expert debugger
-- 🎯 **Adaptive Investigation**: Learns from evidence and pivots when hypotheses are rejected
-- 🔍 **Pattern Recognition**: Automatically recognizes 9 common failure patterns (deadlocks, leaks, starvation, etc.)
-- 💡 **Expert Knowledge Base**: Built-in heuristics and domain knowledge for quick diagnosis
-- 🚀 **Efficient Testing**: Tests hypotheses with 2-3 commands before deep investigation
-- 📈 **Rich CLI**: Beautiful terminal interface with real-time analysis progress
-- 🔄 **Self-Correcting**: Automatically pivots to new hypotheses when evidence contradicts initial assumptions
+- **Hypothesis-Driven Analysis**: Forms and tests hypotheses like an expert debugger
+- **Adaptive Investigation**: Learns from evidence and pivots when hypotheses are rejected
+- **Interactive Chat Mode**: Ask follow-up questions after automated analysis completes
+- **Pattern Recognition**: Automatically recognizes common failure patterns (deadlocks, leaks, starvation, etc.)
+- **Expert Knowledge Base**: Built-in heuristics and domain knowledge for quick diagnosis
+- **Efficient Testing**: Tests hypotheses with 2-3 commands before deep investigation
+- **Rich CLI**: Beautiful terminal interface with real-time analysis progress
+- **Self-Correcting**: Automatically pivots to new hypotheses when evidence contradicts initial assumptions
 
 ## How It Works
 
@@ -25,6 +31,137 @@ The debugger works like an expert engineer would:
    - If INCONCLUSIVE → Gather more targeted evidence (max 2 attempts)
 5. **Investigate**: Execute focused tasks to pinpoint the exact issue
 6. **Report**: Generate actionable findings with evidence
+
+## Why Hypothesis-Driven?
+
+Traditional debuggers execute a fixed plan. This debugger **thinks**:
+
+- **Forms hypotheses** based on symptoms and known patterns
+- **Tests quickly** with 2-3 commands before committing to deep investigation
+- **Pivots when wrong** instead of continuing down the wrong path
+- **Applies expert knowledge** like thread count thresholds and common failure patterns
+- **Builds evidence chains** showing how it reached conclusions
+
+This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, and adapt.
+
+## Interactive Mode
+
+After automated analysis completes, you can ask follow-up questions about the dump. The agent uses existing evidence when possible and executes new debugger commands only when needed.
+
+### Quick Start
+
+```bash
+# Enable interactive mode
+dump-debugger analyze crash.dmp --issue "App hanging" --interactive
+```
+
+### How It Works
+
+The interactive agent follows a 3-step process for each question:
+
+1. **Build Context** - Gathers relevant evidence from the automated analysis
+2. **Assess Sufficiency** - Determines if existing evidence can answer the question
+3. **Investigate** - Runs additional debugger commands only if more data is needed
+
+### Special Commands
+
+| Command | Description |
+|---------|-------------|
+| `/exit` or `/quit` | Exit interactive mode |
+| `/help` | Show available commands |
+| `/report` | Regenerate and display the full analysis report |
+| `/history` | Show conversation history with message count |
+| `/evidence` | List available evidence (conclusions, hypothesis tests, collected data) |
+
+### Session Management
+
+- **Timeout**: Sessions automatically timeout after 30 minutes (configurable)
+- **Message Limit**: Chat history limited to 50 messages (configurable)
+- **Graceful Exit**: Press Ctrl+C or Ctrl+D to exit anytime
+
+### Configuration
+
+Add these settings to your `.env` file:
+
+```env
+# Interactive chat mode settings
+MAX_CHAT_MESSAGES=50                    # Maximum messages in chat history
+CHAT_SESSION_TIMEOUT_MINUTES=30         # Session timeout in minutes
+```
+
+### Example Session
+
+```
+═══════════════════════════════════════════════════
+INTERACTIVE CHAT MODE
+═══════════════════════════════════════════════════
+
+You can now ask follow-up questions about the dump.
+Special commands: /exit (quit), /report (regenerate), /help (show help)
+Session timeout: 30 minutes
+
+Your question: What threads are blocked?
+
+❓ Question: What threads are blocked?
+✓ Sufficient evidence: Information available from !threads output
+
+💬 Answer:
+Based on the !threads output from the investigation, 18 out of 54 threads 
+are blocked. They are all waiting on lock 0x000001a2b3c4d5e6 which is held 
+by thread 42. The blocked threads have call stacks showing they're waiting 
+in the VB expression compiler.
+
+Your question: Show me thread 42's call stack
+
+❓ Question: Show me thread 42's call stack
+🔍 Need more data: Need to get specific thread call stack
+Executing 1 investigative command(s)...
+  Running: ~42s
+  ✓ 00 00007ff8`1234abcd ntdll!NtWaitForSingleObject...
+
+💬 Answer:
+Thread 42 is the lock holder. Its call stack shows...
+
+Your question: /exit
+
+👋 Exiting interactive mode. Goodbye!
+```
+
+### Example Questions
+
+**Root Cause Investigation:**
+- "What was the last exception thrown?"
+- "Which thread caused the crash?"
+- "What is the root cause of the deadlock?"
+
+**Thread Analysis:**
+- "Show me all blocked threads"
+- "What is thread 12 waiting for?"
+- "Are there any threads in infinite loops?"
+
+**Memory Analysis:**
+- "Are there any memory leaks?"
+- "What objects are consuming the most memory?"
+- "Show me the largest objects on the heap"
+
+**Lock Analysis:**
+- "What locks are held?"
+- "Which threads are waiting on locks?"
+- "Is there a deadlock?"
+
+**Exception Analysis:**
+- "What exceptions were thrown?"
+- "Show me the exception call stack"
+- "What is the exception message?"
+
+### Report Integration
+
+All questions and answers from the interactive session are automatically appended to the final report under a "Follow-up Questions & Answers" section with:
+- Each Q&A pair
+- Commands executed for each answer
+- Timestamps and evidence citations
+
+This ensures your entire investigation is documented for future reference.
 
 ## Known Patterns
 
@@ -42,7 +179,7 @@ The debugger automatically recognizes these common issues:
 
 ## Architecture
 
-See [EXPERT_ARCHITECTURE.md](EXPERT_ARCHITECTURE.md) for detailed architecture documentation.
+See `docs/ARCHITECTURE.md` for architecture documentation.
 
 ```
 User Input → Form Hypothesis → Test → Evaluate
@@ -58,7 +195,10 @@ User Input → Form Hypothesis → Test → Evaluate
 - Windows Debugging Tools (CDB required; WinDbg optional)
   - CDB (`cdb.exe`) runs all commands, including data model (`dx`)
   - WinDbg (`windbg.exe`) can be used if you prefer, but is not required
-- Azure OpenAI, Claude via Azure AI Foundry, or standard OpenAI/Anthropic API key
+- LLM Provider (one of the following):
+  - Azure OpenAI or Claude via Azure AI Foundry
+  - Standard OpenAI/Anthropic API key
+  - Optional (recommended for local + tiered routing): Ollama + a code-capable model (e.g., qwen2.5-coder:7b, llama3.1:14b)
 
 ## Installation
 
@@ -114,7 +254,7 @@ ANTHROPIC_API_KEY=your-key
 ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
 ```
 
-See [AZURE_AI_SETUP.md](AZURE_AI_SETUP.md) for detailed Azure AI Foundry setup instructions.
+See `docs/SETUP.md` for provider setup instructions.
 
 ## Usage
 
@@ -133,12 +273,112 @@ Show debugger commands as they execute:
 uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --show-commands
 ```
 
+Interactive mode (ask follow-up questions):
+```powershell
+uv run dump-debugger analyze crash.dmp --issue "App hanging" --interactive
+```
+
 Save detailed session log:
 ```powershell
 uv run dump-debugger analyze crash.dmp --issue "Memory leak" --log-output session.log
 ```
 
-For more examples and workflow details, see [EXPERT_QUICK_REFERENCE.md](EXPERT_QUICK_REFERENCE.md).
+### Session Management
+
+Each analysis creates an isolated session with its own directory containing:
+- Evidence database (SQLite) for large debugger outputs
+- Session metadata and logs
+- Analyzed chunks and findings
+
+List all sessions:
+```powershell
+uv run dump-debugger sessions
+```
+
+Clean up old sessions:
+```powershell
+# Delete sessions older than 7 days, keep 5 most recent
+uv run dump-debugger cleanup --days 7 --keep 5
+```
+
+**Session Isolation Benefits:**
+- Each dump analysis is completely isolated
+- Large outputs (>250KB) are automatically stored externally and analyzed in chunks
+- Evidence from past analyses doesn't contaminate current analysis
+- Session data persists for future reference
+- Sessions are automatically cleaned up based on age
+
+Sessions are stored in `.sessions/` directory by default. Each session is named with timestamp and dump file name:
+```
+.sessions/
+  └── session_20251217_143052_crash_dmp/
+      ├── evidence.db          # SQLite database with analyzed evidence
+      ├── evidence/            # Large debugger outputs
+      │   └── ev_threads_001.txt
+      ├── metadata.json        # Session info
+      └── session.log          # Full session log
+```
+
+For more workflow details, see `docs/ARCHITECTURE.md`.
+
+## Evidence Management
+
+The tool automatically handles large debugger outputs to ensure accurate analysis:
+
+### Automatic Evidence Storage
+
+When a debugger command produces large output (>250KB by default):
+1. **Chunked Analysis**: Output is split into manageable chunks (~250KB each)
+2. **LLM Analysis**: Each chunk is analyzed separately to extract key findings
+3. **External Storage**: Full output stored in session directory
+4. **Database Tracking**: Metadata and findings stored in SQLite
+5. **Smart Retrieval**: Semantic search finds relevant evidence for questions
+
+### Benefits
+
+- **No Token Limits**: Large call stacks, thread dumps analyzed completely
+- **Accurate Results**: No critical information lost to truncation
+- **Fast Search**: Semantic embeddings find relevant evidence quickly
+- **Session Isolation**: Evidence never crosses between different dump analyses
+
+### Configuration
+
+Adjust thresholds in `.env`:
+
+**For Azure OpenAI Embeddings (Recommended):**
+```env
+# Enable semantic search with embeddings
+USE_EMBEDDINGS=true
+EMBEDDINGS_PROVIDER=azure
+
+# Azure OpenAI embeddings deployment
+AZURE_EMBEDDINGS_DEPLOYMENT=text-embedding-3-small
+
+# Storage thresholds
+EVIDENCE_STORAGE_THRESHOLD=250000  # Store outputs larger than 250KB
+EVIDENCE_CHUNK_SIZE=250000         # Chunk size for LLM analysis (~250KB optimized for Claude)
+
+# Optional: Use separate endpoint/key for embeddings
+# If not specified, uses AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY
+#AZURE_EMBEDDINGS_ENDPOINT=https://your-instance.openai.azure.com/
+#AZURE_EMBEDDINGS_API_KEY=your-embeddings-key
+```
+
+**For Standard OpenAI Embeddings:**
+```env
+# Enable semantic search with embeddings
+USE_EMBEDDINGS=true
+EMBEDDINGS_PROVIDER=openai
+EMBEDDINGS_MODEL=text-embedding-3-small
+
+# Requires OpenAI API key
+OPENAI_API_KEY=sk-...
+```
+
+**Disable Embeddings (Use Keyword Search):**
+```env
+USE_EMBEDDINGS=false
+```
 
 ## Example Output
 
@@ -171,7 +411,7 @@ IMPACT: 35% of threads blocked, workflow initialization hung
 RECOMMENDATION: Pre-compile VB expressions at startup, implement throttling
 ```
 
-### Generated Report (report.md)
+### Generated Report (example)
 ```markdown
 ## Executive Summary
 
@@ -204,7 +444,7 @@ the Windows Workflow Foundation's Visual Basic compiler component.
 4. **Monitor lock contention** - Alert when >10 threads blocked
 ```
 
-See [report.md](report.md) for a complete real-world analysis example.
+Tip: you can write reports to a file via `--output <path>`.
 
 ## Performance
 
@@ -253,22 +493,8 @@ uv run ruff check src/
 
 ## Documentation
 
-- [EXPERT_ARCHITECTURE.md](EXPERT_ARCHITECTURE.md) - Detailed architecture and design decisions
-- [EXPERT_QUICK_REFERENCE.md](EXPERT_QUICK_REFERENCE.md) - Quick reference for using the tool
-- [AZURE_AI_SETUP.md](AZURE_AI_SETUP.md) - Setup guide for Azure AI / Claude
-- [UV_GUIDE.md](UV_GUIDE.md) - Guide to using uv package manager
-
-## Why Hypothesis-Driven?
-
-Traditional debuggers execute a fixed plan. This debugger **thinks**:
-
-- **Forms hypotheses** based on symptoms and known patterns
-- **Tests quickly** with 2-3 commands before committing to deep investigation
-- **Pivots when wrong** instead of continuing down the wrong path
-- **Applies expert knowledge** like thread count thresholds and common failure patterns
-- **Builds evidence chains** showing how it reached conclusions
-
-This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, and adapt.
+- `docs/SETUP.md` - Setup and configuration
+- `docs/ARCHITECTURE.md` - Architecture overview
 
 ## License
 

@@ -8,10 +8,14 @@ from langgraph.graph import add_messages
 class Evidence(TypedDict):
     """A single piece of evidence collected during investigation."""
     command: str  # Command that generated this evidence
-    output: str  # Raw command output
+    output: str  # Raw command output (may be truncated if stored externally)
     finding: str  # What was discovered
     significance: str  # Why it matters
     confidence: str  # "high", "medium", or "low"
+    # External storage fields (for large outputs)
+    evidence_type: str  # "inline" or "external"
+    evidence_id: str | None  # ID in evidence store (if external)
+    summary: str | None  # Summary of findings (from analyzer)
 
 
 class HypothesisTest(TypedDict):
@@ -34,6 +38,15 @@ class CommandResult(TypedDict):
     error: str | None
 
 
+class ChatMessage(TypedDict):
+    """A message in the interactive chat session."""
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: str
+    commands_executed: list[str]
+    evidence_used: list[str]
+
+
 class AnalysisState(TypedDict):
     """State for hypothesis-driven workflow: Hypothesis → Test → Investigate → Reason → Report."""
     
@@ -42,6 +55,9 @@ class AnalysisState(TypedDict):
     issue_description: str
     dump_type: str  # "user" or "kernel"
     supports_dx: bool  # Whether data model commands are available
+    
+    # Session management (NEW - for evidence isolation)
+    session_dir: str  # Path to session directory for this analysis
     
     # Hypothesis phase (NEW - expert-level thinking)
     current_hypothesis: str  # Current hypothesis being tested
@@ -77,6 +93,12 @@ class AnalysisState(TypedDict):
     sos_loaded: bool
     show_commands: bool
     should_continue: bool
+    
+    # Interactive mode
+    interactive_mode: bool
+    chat_history: list[ChatMessage]
+    chat_active: bool
+    user_requested_report: bool
 
 
 class PlannerOutput(TypedDict):

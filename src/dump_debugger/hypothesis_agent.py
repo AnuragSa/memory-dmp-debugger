@@ -181,13 +181,23 @@ COMMAND GUIDELINES:
                 if attempt == 0:
                     console.print(f"  [cyan]→[/cyan] {cmd}")
                 
-                output = self.debugger.execute_command(cmd)
+                # Use evidence analysis for large outputs
+                output = self.debugger.execute_command_with_analysis(
+                    cmd,
+                    intent=f"Testing hypothesis: {current_test['hypothesis']}"
+                )
                 
                 # Extract the actual output from the dict returned by debugger
                 if isinstance(output, dict):
                     output_str = output.get('output', '')
+                    evidence_type = output.get('evidence_type', 'inline')
+                    evidence_id = output.get('evidence_id')
+                    analysis = output.get('analysis')
                 else:
                     output_str = str(output)
+                    evidence_type = 'inline'
+                    evidence_id = None
+                    analysis = None
                 
                 # Always show a preview of the output - especially important for retry attempts
                 output_preview = output_str[:500] if len(output_str) > 500 else output_str
@@ -250,11 +260,14 @@ Return JSON:
                 # Command succeeded or we've exhausted retries - store evidence and break
                 evidence_collected.append({
                     'command': cmd,
-                    'output': output_str,
+                    'output': output_str,  # For external evidence, this is already the summary
                     'finding': '',
                     'significance': '',
                     'confidence': 'medium',
-                    'failed': failed
+                    'failed': failed,
+                    'evidence_type': evidence_type,
+                    'evidence_id': evidence_id,
+                    'summary': analysis.get('summary') if analysis else None
                 })
                 
                 state['commands_executed'].append(cmd)
@@ -267,14 +280,16 @@ Return JSON:
         )
         
         # Update test with results
-        # Store evidence with reasonable limits (prepare_evidence will handle dynamic truncation for LLM)
+        # For external evidence, output is already a summary
+        # For inline evidence, keep up to 200KB for Claude 4.5
         for e in evidence_collected:
-            # Keep up to 20K chars per evidence item - prepare_evidence will smartly truncate for LLM
-            if len(e.get('output', '')) > 20000:
-                e['output'] = e['output'][:20000] + '\n[... output truncated at 20K chars ...]'
+            if e.get('evidence_type') != 'external':
+                # Only truncate inline evidence if exceeds 200KB
+                if len(e.get('output', '')) > 200000:
+                    e['output'] = e['output'][:200000] + '\n[... output truncated at 200K chars ...]'
         
         current_test['result'] = evaluation['result']  # 'confirmed', 'rejected', 'inconclusive'
-        current_test['evidence'] = evidence_collected  # Store with reasonable limits
+        current_test['evidence'] = evidence_collected
         current_test['evaluation_reasoning'] = evaluation['reasoning']
         
         console.print(f"\n[bold]{'✅' if evaluation['result'] == 'confirmed' else '❌' if evaluation['result'] == 'rejected' else '❓'} Result:[/bold] {evaluation['result'].upper()}")
@@ -317,7 +332,7 @@ Return JSON:
             console.print("\n[bold yellow]❓ Inconclusive - Gathering more evidence[/bold yellow]")
             return self._gather_more_evidence(state, current_test)
     
-    def _summarize_large_output(self, output: str, max_chars: int = 10000) -> str:
+    def _summarize_large_output(self, output: str, max_chars: int = 50000) -> str:
         """Use LLM to intelligently summarize large command outputs.
         
         Args:
@@ -367,28 +382,28 @@ Keep critical details like thread IDs, addresses, lock holders, and wait pattern
         """
         evidence_parts = []
         total_size = 0
-        MAX_TOTAL = 80000  # chars (~20K tokens, leave room for prompt)
-        MAX_SINGLE = 10000  # chars per evidence item
+        MAX_TOTAL = 800000  # chars (~200K tokens for Claude Sonnet 4.5)
+        MAX_SINGLE = 200000  # chars per evidence item (~50K tokens)
         
         for i, e in enumerate(evidence):
             cmd = e.get('command', 'unknown')
-            output = e.get('output', '')
             
-            # Strategy based on size
-            if len(output) <= MAX_SINGLE:
-                # Small enough - include as-is
-                processed = output
-            elif len(output) <= 50000:
-                # Medium - smart truncation (head + tail + middle sample)
-                head = output[:3000]
-                tail = output[-3000:]
-                middle_start = len(output) // 2 - 1000
-                middle = output[middle_start:middle_start + 2000]
-                processed = f"{head}\n\n[... {len(output) - 8000} chars omitted ...]\n\n{middle}\n\n[... more content ...]\n\n{tail}"
-                console.print(f"[dim]  Evidence {i+1}: Smart truncation ({len(output)} → {len(processed)} chars)[/dim]")
+            # Check if this is external evidence with analysis
+            if e.get('evidence_type') == 'external' and e.get('summary'):
+                # Use the analyzed summary instead of truncating raw output
+                processed = f"[Large output analyzed externally]\nSummary: {e.get('summary')}"
+                console.print(f"[dim]  Evidence {i+1}: Using analyzed summary from evidence store[/dim]")
             else:
-                # Large - LLM summarization
-                processed = self._summarize_large_output(output, MAX_SINGLE)
+                # Inline evidence - include up to MAX_SINGLE, truncate if larger
+                output = e.get('output', '')
+                
+                if len(output) <= MAX_SINGLE:
+                    # Include as-is - Claude 4.5 handles large contexts well
+                    processed = output
+                else:
+                    # Truncate if exceeds limit (rare with 200KB threshold)
+                    processed = output[:MAX_SINGLE] + f"\n\n[... truncated {len(output) - MAX_SINGLE} chars ...]"
+                    console.print(f"[dim]  Evidence {i+1}: Truncated to {MAX_SINGLE} chars[/dim]")
             
             entry = f"Command: {cmd}\nOutput:\n{processed}"
             
