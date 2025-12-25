@@ -107,7 +107,7 @@ class EvidenceAnalyzer:
             from dump_debugger.analyzers import (
                 ThreadsAnalyzer, SyncBlockAnalyzer, ThreadPoolAnalyzer,
                 FinalizeQueueAnalyzer, EEHeapAnalyzer, DumpHeapAnalyzer,
-                GCHandlesAnalyzer, CLRStackAnalyzer
+                GCHandlesAnalyzer, CLRStackAnalyzer, GCRootAnalyzer, DOAnalyzer
             )
             analyzer_map = {
                 "threads": ThreadsAnalyzer,
@@ -118,6 +118,8 @@ class EvidenceAnalyzer:
                 "dumpheap": DumpHeapAnalyzer,
                 "gchandles": GCHandlesAnalyzer,
                 "clrstack": CLRStackAnalyzer,
+                "gcroot": GCRootAnalyzer,
+                "do": DOAnalyzer,
             }
             
             if analyzer_info["name"] in analyzer_map:

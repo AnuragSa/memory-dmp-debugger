@@ -138,6 +138,7 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             base_url=settings.local_llm_base_url,
             temperature=temperature,
             timeout=settings.local_llm_timeout,
+            num_ctx=settings.local_llm_context_size,
         )
         _llm_cache[cache_key] = llm
         return llm
