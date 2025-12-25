@@ -2,16 +2,21 @@
 
 An AI-powered memory dump analyzer that uses hypothesis-driven investigation with LangGraph and WinDbg to automatically diagnose crashes, hangs, and memory issues.
 
+## Documentation
+
+- Setup and configuration: `docs/SETUP.md`
+- Architecture overview: `docs/ARCHITECTURE.md`
+
 ## Features
 
-- 🧠 **Hypothesis-Driven Analysis**: Forms and tests hypotheses like an expert debugger
-- 🎯 **Adaptive Investigation**: Learns from evidence and pivots when hypotheses are rejected
-- � **Interactive Chat Mode**: Ask follow-up questions after automated analysis completes
-- �🔍 **Pattern Recognition**: Automatically recognizes 9 common failure patterns (deadlocks, leaks, starvation, etc.)
-- 💡 **Expert Knowledge Base**: Built-in heuristics and domain knowledge for quick diagnosis
-- 🚀 **Efficient Testing**: Tests hypotheses with 2-3 commands before deep investigation
-- 📈 **Rich CLI**: Beautiful terminal interface with real-time analysis progress
-- 🔄 **Self-Correcting**: Automatically pivots to new hypotheses when evidence contradicts initial assumptions
+- **Hypothesis-Driven Analysis**: Forms and tests hypotheses like an expert debugger
+- **Adaptive Investigation**: Learns from evidence and pivots when hypotheses are rejected
+- **Interactive Chat Mode**: Ask follow-up questions after automated analysis completes
+- **Pattern Recognition**: Automatically recognizes common failure patterns (deadlocks, leaks, starvation, etc.)
+- **Expert Knowledge Base**: Built-in heuristics and domain knowledge for quick diagnosis
+- **Efficient Testing**: Tests hypotheses with 2-3 commands before deep investigation
+- **Rich CLI**: Beautiful terminal interface with real-time analysis progress
+- **Self-Correcting**: Automatically pivots to new hypotheses when evidence contradicts initial assumptions
 
 ## How It Works
 
@@ -162,7 +167,7 @@ The debugger automatically recognizes these common issues:
 
 ## Architecture
 
-See [EXPERT_ARCHITECTURE.md](EXPERT_ARCHITECTURE.md) for detailed architecture documentation.
+See `docs/ARCHITECTURE.md` for architecture documentation.
 
 ```
 User Input → Form Hypothesis → Test → Evaluate
@@ -178,7 +183,7 @@ User Input → Form Hypothesis → Test → Evaluate
 - Windows Debugging Tools (CDB required; WinDbg optional)
   - CDB (`cdb.exe`) runs all commands, including data model (`dx`)
   - WinDbg (`windbg.exe`) can be used if you prefer, but is not required
-- Azure OpenAI, Claude via Azure AI Foundry, or standard OpenAI/Anthropic API key
+- Azure OpenAI, Claude (or any other model capable of reasoning over the code) via Azure AI Foundry, or standard OpenAI/Anthropic API key
 
 ## Installation
 
@@ -234,7 +239,7 @@ ANTHROPIC_API_KEY=your-key
 ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
 ```
 
-See [AZURE_AI_SETUP.md](AZURE_AI_SETUP.md) for detailed Azure AI Foundry setup instructions.
+See `docs/SETUP.md` for provider setup instructions.
 
 ## Usage
 
@@ -299,7 +304,7 @@ Sessions are stored in `.sessions/` directory by default. Each session is named 
       └── session.log          # Full session log
 ```
 
-For more examples and workflow details, see [EXPERT_QUICK_REFERENCE.md](EXPERT_QUICK_REFERENCE.md).
+For more workflow details, see `docs/ARCHITECTURE.md`.
 
 ## Evidence Management
 
@@ -391,7 +396,7 @@ IMPACT: 35% of threads blocked, workflow initialization hung
 RECOMMENDATION: Pre-compile VB expressions at startup, implement throttling
 ```
 
-### Generated Report (report.md)
+### Generated Report (example)
 ```markdown
 ## Executive Summary
 
@@ -424,7 +429,7 @@ the Windows Workflow Foundation's Visual Basic compiler component.
 4. **Monitor lock contention** - Alert when >10 threads blocked
 ```
 
-See [report.md](report.md) for a complete real-world analysis example.
+Tip: you can write reports to a file via `--output <path>`.
 
 ## Performance
 
@@ -473,10 +478,8 @@ uv run ruff check src/
 
 ## Documentation
 
-- [EXPERT_ARCHITECTURE.md](EXPERT_ARCHITECTURE.md) - Detailed architecture and design decisions
-- [EXPERT_QUICK_REFERENCE.md](EXPERT_QUICK_REFERENCE.md) - Quick reference for using the tool
-- [AZURE_AI_SETUP.md](AZURE_AI_SETUP.md) - Setup guide for Azure AI / Claude
-- [UV_GUIDE.md](UV_GUIDE.md) - Guide to using uv package manager
+- `docs/SETUP.md` - Setup and configuration
+- `docs/ARCHITECTURE.md` - Architecture overview
 
 ## Why Hypothesis-Driven?
 
