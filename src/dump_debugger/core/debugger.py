@@ -441,8 +441,35 @@ class DebuggerWrapper:
             # Clear buffer before sending command
             self._clear_buffer()
             
-            # Send the command
-            self._send_command(command_stripped)
+            # Check if command contains thread switch - WinDbg supports multiple syntaxes:
+            # ~<number>s        - switch by thread index (e.g., ~19s)
+            # ~~[<tid>]s        - switch by OS thread ID (e.g., ~~[3fc]s or ~~[0x3fc]s)
+            # ~~s               - switch to last event thread
+            # ~*s               - all threads switch
+            # Pattern: Match thread switch followed optionally by semicolon and command
+            thread_switch_match = re.match(r'^(~+(?:\d+|\[(?:0x)?[0-9a-fA-F]+\]|\*)?s);?\s*(.*)$', command_stripped)
+            
+            if thread_switch_match:
+                # Split thread switch from actual command
+                thread_switch = thread_switch_match.group(1)
+                actual_command = thread_switch_match.group(2)
+                
+                if actual_command:
+                    # Send thread switch first and wait for context to update
+                    self._send_command(thread_switch)
+                    time.sleep(0.2)  # Allow context switch to complete
+                    
+                    # Clear buffer after thread switch to discard switch confirmation
+                    self._clear_buffer()
+                    
+                    # Now send the actual command
+                    self._send_command(actual_command)
+                else:
+                    # Just a thread switch command with no following command
+                    self._send_command(command_stripped)
+            else:
+                # Regular command without thread switch
+                self._send_command(command_stripped)
             
             # Send delimiter command to mark end of output
             # Use .echo with a unique marker
