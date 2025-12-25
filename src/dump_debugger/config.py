@@ -59,10 +59,12 @@ class Settings(BaseSettings):
     local_llm_timeout: int = Field(
         default=120,
         description="Timeout for local LLM requests in seconds"
-    )    local_llm_context_size: int = Field(
+    )
+    local_llm_context_size: int = Field(
         default=32768,
         description="Context window size for local LLM in tokens (32768 = ~120KB text)"
-    )    
+    )
+    
     # Tiered LLM Strategy
     use_tiered_llm: bool = Field(
         default=False,
@@ -102,8 +104,8 @@ class Settings(BaseSettings):
         description="Maximum number of debugger iterations"
     )
     command_timeout: int = Field(
-        default=600,
-        description="Timeout for debugger commands in seconds (10 minutes for slow commands like !dumpheap, ~*e !CLRStack)"
+        default=1800,
+        description="Timeout for debugger commands in seconds (30 minutes for slow commands like !gcroot -all, !dumpheap)"
     )
     enable_data_model_commands: bool = Field(
         default=True,
