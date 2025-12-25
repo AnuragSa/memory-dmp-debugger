@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 
-from dump_debugger.workflows import run_analysis, enable_logging
+from dump_debugger.workflows import run_analysis
 
 console = Console()
 
@@ -65,10 +65,6 @@ def analyze(
         dump-debugger analyze crash.dmp --issue "App hanging" --log-output analysis.log
     """
     try:
-        # Setup console logging if requested
-        if log_output:
-            enable_logging(log_output)
-        
         if interactive:
             console.print("[cyan]Interactive mode enabled - you can ask follow-up questions after analysis[/cyan]")
         
@@ -78,6 +74,7 @@ def analyze(
             issue, 
             show_commands=show_commands,
             log_to_file=(log_output is not None),
+            log_output_path=log_output,
             interactive=interactive
         )
         

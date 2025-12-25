@@ -20,7 +20,14 @@ Complete guide for setting up and configuring the Memory Dump Debugger with vari
 
 ## Quick Start
 
-### 1. Install uv (Package Manager)
+### 1. Navigate to Project Root
+
+```powershell
+# Navigate to the repository root directory
+cd C:\Anurag\projects\debugger\memory-dmp-debugger  # Adjust path to your location
+```
+
+### 2. Install uv (Package Manager)
 
 ```powershell
 # Install uv
@@ -30,20 +37,31 @@ pip install uv
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
-### 2. Install Dependencies
+### 3. Install Dependencies
 
 ```powershell
-# Install dependencies from pyproject.toml
+# Install dependencies from pyproject.toml (from repo root)
 uv sync
 ```
 
-### 3. Configure LLM Provider
+### 4. Configure Environment
+
+```powershell
+# Copy example config and edit it
+copy .env.example .env
+# Edit .env with your API keys and paths
+```
+
+### 5. Configure LLM Provider
 
 Choose one of the options below and update your `.env` file.
 
-### 4. Run Analysis
+**Note:** If you want local inference (recommended for cost savings), install Ollama and pull a code-capable model like `qwen2.5-coder:7b` or `llama3.1:14b`.
+
+### 6. Run Analysis
 
 ```bash
+# From repo root directory
 uv run dump-debugger analyze crash.dmp --issue "Why is the app slow?"
 ```
 

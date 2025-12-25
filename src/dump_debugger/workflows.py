@@ -1026,6 +1026,7 @@ def run_analysis(
     issue_description: str,
     show_commands: bool = False,
     log_to_file: bool = True,
+    log_output_path: Path | None = None,
     interactive: bool = False,
 ) -> str:
     """Run expert-level hypothesis-driven memory dump analysis.
@@ -1035,6 +1036,7 @@ def run_analysis(
         issue_description: User's description of the issue
         show_commands: Whether to show debugger command outputs
         log_to_file: Whether to log output to session.log
+        log_output_path: Custom log file path (relative to session dir or absolute)
         interactive: Whether to enable interactive chat mode after analysis
         
     Returns:
@@ -1052,9 +1054,14 @@ def run_analysis(
     
     # Set up logging to session directory
     if log_to_file:
-        log_path = session_dir / "session.log"
-        console.print(f"[dim]Logging to: {log_path}[/dim]")
-        _log_file_handle = open(log_path, 'w', encoding='utf-8')
+        # Resolve log path: if relative, place inside session_dir; if absolute, use as-is
+        if log_output_path is not None:
+            resolved_log_path = log_output_path if log_output_path.is_absolute() else (session_dir / log_output_path)
+        else:
+            resolved_log_path = session_dir / "session.log"
+        
+        console.print(f"[dim]Logging to: {resolved_log_path}[/dim]")
+        _log_file_handle = open(resolved_log_path, 'w', encoding='utf-8')
         _original_stdout = sys.stdout
         sys.stdout = TeeOutput(_original_stdout, _log_file_handle)
     

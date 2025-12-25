@@ -32,6 +32,18 @@ The debugger works like an expert engineer would:
 5. **Investigate**: Execute focused tasks to pinpoint the exact issue
 6. **Report**: Generate actionable findings with evidence
 
+## Why Hypothesis-Driven?
+
+Traditional debuggers execute a fixed plan. This debugger **thinks**:
+
+- **Forms hypotheses** based on symptoms and known patterns
+- **Tests quickly** with 2-3 commands before committing to deep investigation
+- **Pivots when wrong** instead of continuing down the wrong path
+- **Applies expert knowledge** like thread count thresholds and common failure patterns
+- **Builds evidence chains** showing how it reached conclusions
+
+This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, and adapt.
+
 ## Interactive Mode
 
 After automated analysis completes, you can ask follow-up questions about the dump. The agent uses existing evidence when possible and executes new debugger commands only when needed.
@@ -183,7 +195,10 @@ User Input → Form Hypothesis → Test → Evaluate
 - Windows Debugging Tools (CDB required; WinDbg optional)
   - CDB (`cdb.exe`) runs all commands, including data model (`dx`)
   - WinDbg (`windbg.exe`) can be used if you prefer, but is not required
-- Azure OpenAI, Claude (or any other model capable of reasoning over the code) via Azure AI Foundry, or standard OpenAI/Anthropic API key
+- LLM Provider (one of the following):
+  - Azure OpenAI or Claude via Azure AI Foundry
+  - Standard OpenAI/Anthropic API key
+  - Optional (recommended for local + tiered routing): Ollama + a code-capable model (e.g., qwen2.5-coder:7b, llama3.1:14b)
 
 ## Installation
 
@@ -288,7 +303,7 @@ uv run dump-debugger cleanup --days 7 --keep 5
 
 **Session Isolation Benefits:**
 - Each dump analysis is completely isolated
-- Large outputs (>10KB) are automatically stored externally and analyzed in chunks
+- Large outputs (>250KB) are automatically stored externally and analyzed in chunks
 - Evidence from past analyses doesn't contaminate current analysis
 - Session data persists for future reference
 - Sessions are automatically cleaned up based on age
@@ -312,8 +327,8 @@ The tool automatically handles large debugger outputs to ensure accurate analysi
 
 ### Automatic Evidence Storage
 
-When a debugger command produces large output (>10KB by default):
-1. **Chunked Analysis**: Output is split into manageable chunks (8KB each)
+When a debugger command produces large output (>250KB by default):
+1. **Chunked Analysis**: Output is split into manageable chunks (~250KB each)
 2. **LLM Analysis**: Each chunk is analyzed separately to extract key findings
 3. **External Storage**: Full output stored in session directory
 4. **Database Tracking**: Metadata and findings stored in SQLite
@@ -340,8 +355,8 @@ EMBEDDINGS_PROVIDER=azure
 AZURE_EMBEDDINGS_DEPLOYMENT=text-embedding-3-small
 
 # Storage thresholds
-EVIDENCE_STORAGE_THRESHOLD=10000  # Store outputs larger than 10KB
-EVIDENCE_CHUNK_SIZE=8000          # Chunk size for LLM analysis
+EVIDENCE_STORAGE_THRESHOLD=250000  # Store outputs larger than 250KB
+EVIDENCE_CHUNK_SIZE=250000         # Chunk size for LLM analysis (~250KB optimized for Claude)
 
 # Optional: Use separate endpoint/key for embeddings
 # If not specified, uses AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY
@@ -480,18 +495,6 @@ uv run ruff check src/
 
 - `docs/SETUP.md` - Setup and configuration
 - `docs/ARCHITECTURE.md` - Architecture overview
-
-## Why Hypothesis-Driven?
-
-Traditional debuggers execute a fixed plan. This debugger **thinks**:
-
-- **Forms hypotheses** based on symptoms and known patterns
-- **Tests quickly** with 2-3 commands before committing to deep investigation
-- **Pivots when wrong** instead of continuing down the wrong path
-- **Applies expert knowledge** like thread count thresholds and common failure patterns
-- **Builds evidence chains** showing how it reached conclusions
-
-This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, and adapt.
 
 ## License
 
