@@ -181,6 +181,31 @@ COMMAND GUIDELINES:
                 if attempt == 0:
                     console.print(f"  [cyan]→[/cyan] {cmd}")
                 
+                # Check for placeholders and try to resolve them
+                from dump_debugger.utils import detect_placeholders, resolve_command_placeholders
+                if detect_placeholders(cmd):
+                    console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {cmd}")
+                    
+                    # Build previous evidence for placeholder resolution
+                    previous_evidence = []
+                    if evidence_collected:
+                        previous_evidence.extend([{
+                            'command': ev.command,
+                            'output': ev.output,
+                            'summary': ev.summary or '',
+                            'evidence_type': ev.evidence_type
+                        } for ev in evidence_collected])
+                    
+                    resolved_cmd, success, message = resolve_command_placeholders(cmd, previous_evidence)
+                    
+                    if success:
+                        console.print(f"  [green]✓ Resolved to:[/green] {resolved_cmd}")
+                        cmd = resolved_cmd
+                    else:
+                        console.print(f"  [red]✗ {message}[/red]")
+                        console.print(f"  [yellow]⚠ Skipping command with unresolved placeholders[/yellow]")
+                        break  # Skip this command, move to next
+                
                 # Use evidence analysis for large outputs
                 output = self.debugger.execute_command_with_analysis(
                     cmd,
