@@ -21,27 +21,40 @@ class PlaceholderResolver:
     
     # Patterns for different placeholder types
     PLACEHOLDER_PATTERNS = {
-        'address': re.compile(r'<(?:address|addr)(?:_of_)?(?:\w+)?>', re.IGNORECASE),
-        'mt': re.compile(r'<(?:MT|MethodTable)(?:_of_)?(?:\w+)?>', re.IGNORECASE),
-        'object': re.compile(r'<object(?:_\w+)?>', re.IGNORECASE),
-        'thread': re.compile(r'<(?:thread|tid)(?:_\w+)?>', re.IGNORECASE),
-        'module': re.compile(r'<module(?:_\w+)?>', re.IGNORECASE),
-        'value': re.compile(r'<(?:value|val)(?:_\w+)?>', re.IGNORECASE),
+        # Match any <...address...> or <...addr...>
+        'address': re.compile(r'<[^>]*(?:address|addr)[^>]*>', re.IGNORECASE),
+        # Match any <...MT...> or <...MethodTable...> or <...method table...>
+        'mt': re.compile(r'<[^>]*(?:MT\b|MethodTable|method table)[^>]*>', re.IGNORECASE),
+        # Match any <...object...>
+        'object': re.compile(r'<[^>]*object[^>]*>', re.IGNORECASE),
+        # Match any <...thread...> or <...tid...>
+        'thread': re.compile(r'<[^>]*(?:thread|tid)[^>]*>', re.IGNORECASE),
+        # Match any <...module...>
+        'module': re.compile(r'<[^>]*module[^>]*>', re.IGNORECASE),
+        # Match any <...value...> or <...val...>
+        'value': re.compile(r'<[^>]*(?:value|val)[^>]*>', re.IGNORECASE),
     }
     
     # Patterns to extract actual values from evidence
     EXTRACTION_PATTERNS = {
         'address': [
-            # Hex addresses like 0x00007ff8a1234567 or 000001f2a3b4c5d6
+            # Hex addresses like 0x00007ff8a1234567 or 000001f2a3b4c5d6 (8-16 hex digits)
             re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
         ],
         'mt': [
-            # MethodTable column in dumpheap output: MT    Count TotalSize Class Name
+            # MethodTable from dumpheap -stat output: MT    Count TotalSize Class Name
             re.compile(r'^([0-9a-f]{8,16})\s+\d+\s+\d+', re.IGNORECASE | re.MULTILINE),
+            # MT from object inspection: MT: 0x00007ff8a1234567
+            re.compile(r'MT:\s*(?:0x)?([0-9a-f]{8,16})', re.IGNORECASE),
+            # Any hex address that might be an MT
+            re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
         ],
         'object': [
             # Object addresses in various formats
             re.compile(r'(?:Object|Address):\s*(?:0x)?([0-9a-f]{8,16})', re.IGNORECASE),
+            # Addresses in dumpheap output (one per line)
+            re.compile(r'^(?:0x)?([0-9a-f]{8,16})$', re.IGNORECASE | re.MULTILINE),
+            # Any hex address
             re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
         ],
         'thread': [
@@ -136,7 +149,7 @@ class PlaceholderResolver:
         return values
     
     def _filter_by_context(self, values: list[str], context_hint: str, source_text: str) -> list[str]:
-        """Filter values based on context hint like 'largest', 'first', 'sample'.
+        """Filter values based on context hint like 'largest', 'first', 'sample', 'ResolveOperation'.
         
         Args:
             values: List of extracted values
@@ -148,15 +161,33 @@ class PlaceholderResolver:
         """
         context_hint_lower = context_hint.lower()
         
-        # For "largest" or "biggest", try to find values with largest associated numbers
-        if 'largest' in context_hint_lower or 'biggest' in context_hint_lower:
+        # Check for class/type names in the context
+        # E.g., "ResolveOperation", "SqlConnection", "String"
+        type_name_match = re.search(r'\b([A-Z][a-zA-Z0-9_.]+)\b', context_hint)
+        if type_name_match:
+            type_name = type_name_match.group(1)
+            # Filter values that appear on lines mentioning this type
+            filtered = []
+            for value in values:
+                value_without_prefix = value.replace('0x', '')
+                # Find lines containing both the value and the type name
+                for line in source_text.split('\n'):
+                    if value_without_prefix in line and type_name in line:
+                        filtered.append(value)
+                        break
+            if filtered:
+                return filtered[:5]
+        
+        # For "largest" or "biggest" or size-related hints (e.g., "6MB", "large")
+        if any(word in context_hint_lower for word in ['largest', 'biggest', 'large', 'mb', 'gb', 'kb']):
             # In dumpheap output, look for lines with these addresses and their TotalSize
             value_scores = []
             for value in values:
+                value_without_prefix = value.replace('0x', '')
                 # Find lines containing this value
                 for line in source_text.split('\n'):
-                    if value.replace('0x', '') in line:
-                        # Extract numbers from the line
+                    if value_without_prefix in line:
+                        # Extract numbers from the line (could be sizes, counts)
                         numbers = re.findall(r'\b(\d+)\b', line)
                         if numbers:
                             # Use the largest number as score (could be TotalSize or Count)

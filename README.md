@@ -51,8 +51,8 @@ After automated analysis completes, you can ask follow-up questions about the du
 ### Quick Start
 
 ```bash
-# Enable interactive mode
-dump-debugger analyze crash.dmp --issue "App hanging" --interactive
+# Basic analysis (interactive mode + command output enabled by default)
+dump-debugger analyze crash.dmp --issue "App hanging"
 ```
 
 ### How It Works
@@ -96,7 +96,7 @@ CHAT_SESSION_TIMEOUT_MINUTES=30         # Session timeout in minutes
 INTERACTIVE CHAT MODE
 ═══════════════════════════════════════════════════
 
-You can now ask follow-up questions about the dump.
+You can ask follow-up questions about the dump.
 Special commands: /exit (quit), /report (regenerate), /help (show help)
 Session timeout: 30 minutes
 
@@ -258,7 +258,7 @@ See `docs/SETUP.md` for provider setup instructions.
 
 ## Usage
 
-Basic usage:
+Basic usage (interactive mode + command output enabled by default):
 ```powershell
 uv run dump-debugger analyze crash.dmp --issue "Application crashed on startup"
 ```
@@ -268,14 +268,14 @@ With output file:
 uv run dump-debugger analyze crash.dmp --issue "High CPU usage" --output report.md
 ```
 
-Show debugger commands as they execute:
+Disable interactive mode if you just want automated analysis:
 ```powershell
-uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --show-command-output
+uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --no-interactive
 ```
 
-Interactive mode (ask follow-up questions):
+Hide debugger command outputs (if you prefer cleaner output):
 ```powershell
-uv run dump-debugger analyze crash.dmp --issue "App hanging" --interactive
+uv run dump-debugger analyze crash.dmp --issue "App hanging" --no-show-command-output
 ```
 
 Save detailed session log:

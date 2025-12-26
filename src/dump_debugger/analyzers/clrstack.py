@@ -157,6 +157,20 @@ class CLRStackAnalyzer(BaseAnalyzer):
         
         findings.extend(cross_thread_analysis.get("insights", []))
         
+        # Add concrete example stacks for threads with interesting patterns
+        # This gives the LLM detailed diagnostic data instead of just summaries
+        example_stacks = self._get_example_stacks(thread_analyses, exceptions_found)
+        if example_stacks:
+            findings.append("\nExample thread stacks:")
+            findings.extend(example_stacks)
+        
+        # Add concrete example stacks for threads with interesting patterns
+        # This gives the LLM detailed diagnostic data instead of just summaries
+        example_stacks = self._get_example_stacks(thread_analyses, exceptions_found)
+        if example_stacks:
+            findings.append("\nExample thread stacks:")
+            findings.extend(example_stacks)
+        
         return AnalysisResult(
             structured_data={
                 "thread_count": len(thread_analyses),
@@ -332,12 +346,22 @@ Be concise and technical. Focus on actionable information."""
         exceptions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Analyze patterns across multiple threads."""
-        # Build summary of threads
-        thread_summary = "\n".join(
-            f"Thread {t['thread_id']}: {t['frame_count']} frames" +
-            (" [EXCEPTION]" if t['has_exception'] else "")
-            for t in thread_analyses[:20]  # Limit to 20 threads
-        )
+        # Build summary of threads with top stack frames (critical for diagnosing blocking calls)
+        thread_details = []
+        for t in thread_analyses[:20]:  # Limit to 20 threads
+            thread_line = f"Thread {t['thread_id']}: {t['frame_count']} frames"
+            if t['has_exception']:
+                thread_line += " [EXCEPTION]"
+            
+            # Include top 7 stack frames to show what the thread is doing (full call chain context)
+            if t.get('frames'):
+                top_frames = t['frames'][:7]
+                frame_list = ", ".join([f['call_site'] for f in top_frames])
+                thread_line += f" -> {frame_list}"
+            
+            thread_details.append(thread_line)
+        
+        thread_summary = "\n".join(thread_details)
         
         exception_summary = "\n".join(
             f"Thread {e['thread_id']}: {e['exception']['type']}"
@@ -378,3 +402,54 @@ Be concise."""
                 "insights": [],
                 "full_analysis": "",
             }
+    
+    def _get_example_stacks(self, thread_analyses: List[Dict[str, Any]], exceptions: List[Dict[str, Any]]) -> List[str]:
+        """Get example COMPLETE stacks for threads with interesting patterns.
+        
+        Returns FULL detailed stacks (all frames, not truncated) for:
+        1. Threads with exceptions
+        2. Representative threads from EACH unique blocking pattern
+        
+        This ensures the LLM sees all different types of blocking, not just the first N threads.
+        """
+        examples = []
+        blocking_keywords = ['wait', 'lock', 'result', 'getawaiter', 'monitor', 'semaphore', 'mutex']
+        
+        # First, add exception threads - FULL stacks
+        for exc in exceptions[:2]:  # Max 2 exception examples
+            thread_id = exc['thread_id']
+            thread = next((t for t in thread_analyses if t['thread_id'] == thread_id), None)
+            if thread and thread.get('frames'):
+                # Include ALL frames for complete diagnostic data
+                frames_text = "\n    ".join([f['call_site'] for f in thread['frames']])
+                examples.append(f"  Thread {thread_id} [EXCEPTION: {exc['exception']['type']}]:\n    {frames_text}")
+        
+        # Group threads by their blocking pattern (top 3 frames define the pattern)
+        blocking_patterns = {}
+        for t in thread_analyses:
+            if t.get('frames'):
+                # Check if any frame contains blocking keywords
+                stack_text = ' '.join([f['call_site'].lower() for f in t['frames']])
+                if any(keyword in stack_text for keyword in blocking_keywords):
+                    # Use top 3 frames as the pattern signature
+                    pattern_key = tuple([f['call_site'] for f in t['frames'][:3]])
+                    if pattern_key not in blocking_patterns:
+                        blocking_patterns[pattern_key] = []
+                    blocking_patterns[pattern_key].append(t)
+        
+        # Add 1-2 examples from each unique blocking pattern (up to 8 patterns total)
+        max_patterns = 8 - len(examples)  # Reserve space for exceptions
+        pattern_count = 0
+        for pattern_threads in blocking_patterns.values():
+            if pattern_count >= max_patterns:
+                break
+            
+            # Show first thread from this pattern (representative)
+            t = pattern_threads[0]
+            frames_text = "\n    ".join([f['call_site'] for f in t['frames']])
+            thread_count = len(pattern_threads)
+            label = f"BLOCKING - {thread_count} thread(s) with this pattern" if thread_count > 1 else "BLOCKING"
+            examples.append(f"  Thread {t['thread_id']} [{label}]:\n    {frames_text}")
+            pattern_count += 1
+        
+        return examples

@@ -711,12 +711,28 @@ class DebuggerWrapper:
             console.print(f"[green]✓[/green] Analyzed and stored as evidence {evidence_id}")
             return result
         else:
-            # Small output - return analysis inline (no external storage)
+            # Small output - return analysis inline but also update DB with analysis
             result['evidence_type'] = 'inline'
             result['analysis'] = {
                 'summary': analysis.get('summary', ''),
                 'key_findings': analysis.get('key_findings', [])
             }
+            
+            # Update the database with analysis if evidence was already cached
+            if result.get('cached') and result.get('evidence_id'):
+                evidence_id = result['evidence_id']
+                self.evidence_store.conn.execute("""
+                    UPDATE evidence 
+                    SET summary = ?, key_findings = ?
+                    WHERE id = ?
+                """, [
+                    analysis['summary'],
+                    json.dumps(analysis['key_findings']),
+                    evidence_id
+                ])
+                self.evidence_store.conn.commit()
+                console.print(f"[dim]Updated {evidence_id} with inline analysis[/dim]")
+            
             # Keep original output for inline evidence
             return result
 
