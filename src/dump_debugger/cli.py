@@ -39,7 +39,7 @@ def cli() -> None:
     help="Interactive mode - pause after each step for user confirmation"
 )
 @click.option(
-    "--show-commands",
+    "--show-command-output",
     is_flag=True,
     default=False,
     help="Show debugger command outputs (default: hidden)"
@@ -55,7 +55,7 @@ def analyze(
     issue: str,
     output: Path | None,
     interactive: bool,
-    show_commands: bool,
+    show_command_output: bool,
     log_output: Path | None
 ) -> None:
     """Analyze a memory dump file.
@@ -72,7 +72,7 @@ def analyze(
         report = run_analysis(
             dump_path, 
             issue, 
-            show_commands=show_commands,
+            show_command_output=show_command_output,
             log_to_file=(log_output is not None),
             log_output_path=log_output,
             interactive=interactive

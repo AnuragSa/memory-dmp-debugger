@@ -97,7 +97,7 @@ Return ONLY valid JSON in this exact format:
             rationale = result.get('rationale', '')
             
             console.print(f"  [dim]→ {command}[/dim]")
-            if rationale and state.get('show_commands'):
+            if rationale and state.get('show_command_output'):
                 console.print(f"  [dim italic]{rationale}[/dim italic]")
                 
         except (json.JSONDecodeError, KeyError) as e:
@@ -1024,7 +1024,7 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
 def run_analysis(
     dump_path: Path,
     issue_description: str,
-    show_commands: bool = False,
+    show_command_output: bool = False,
     log_to_file: bool = True,
     log_output_path: Path | None = None,
     interactive: bool = False,
@@ -1034,7 +1034,7 @@ def run_analysis(
     Args:
         dump_path: Path to the dump file
         issue_description: User's description of the issue
-        show_commands: Whether to show debugger command outputs
+        show_command_output: Whether to show debugger command outputs
         log_to_file: Whether to log output to session.log
         log_output_path: Custom log file path (relative to session dir or absolute)
         interactive: Whether to enable interactive chat mode after analysis
@@ -1115,7 +1115,7 @@ def run_analysis(
             
             # Flags
             'sos_loaded': False,
-            'show_commands': show_commands,
+            'show_command_output': show_command_output,
             'should_continue': True,
             
             # Interactive mode

@@ -226,8 +226,8 @@ COMMAND GUIDELINES:
                 
                 # Always show a preview of the output - especially important for retry attempts
                 output_preview = output_str[:500] if len(output_str) > 500 else output_str
-                # Show output on retries (attempt > 0) OR if show_commands is enabled
-                if attempt > 0 or state.get('show_commands'):
+                # Show output on retries (attempt > 0) OR if show_command_output is enabled
+                if attempt > 0 or state.get('show_command_output'):
                     console.print(f"[dim]{output_preview}{'...' if len(output_str) > 500 else ''}[/dim]")
                 
                 # Detect command failures

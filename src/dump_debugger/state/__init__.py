@@ -91,7 +91,7 @@ class AnalysisState(TypedDict):
     
     # Utility flags
     sos_loaded: bool
-    show_commands: bool
+    show_command_output: bool
     should_continue: bool
     
     # Interactive mode

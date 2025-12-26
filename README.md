@@ -270,7 +270,7 @@ uv run dump-debugger analyze crash.dmp --issue "High CPU usage" --output report.
 
 Show debugger commands as they execute:
 ```powershell
-uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --show-commands
+uv run dump-debugger analyze crash.dmp --issue "Deadlock suspected" --show-command-output
 ```
 
 Interactive mode (ask follow-up questions):
