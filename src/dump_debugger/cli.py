@@ -34,15 +34,14 @@ def cli() -> None:
     help="Save report to file (default: print to console)"
 )
 @click.option(
-    "--interactive",
-    is_flag=True,
-    help="Interactive mode - pause after each step for user confirmation"
+    "--interactive/--no-interactive",
+    default=True,
+    help="Interactive mode - ask follow-up questions (default: enabled)"
 )
 @click.option(
-    "--show-command-output",
-    is_flag=True,
-    default=False,
-    help="Show debugger command outputs (default: hidden)"
+    "--show-command-output/--no-show-command-output",
+    default=True,
+    help="Show debugger command outputs (default: enabled)"
 )
 @click.option(
     "--log-output",

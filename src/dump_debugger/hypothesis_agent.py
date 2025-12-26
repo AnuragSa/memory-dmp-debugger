@@ -114,7 +114,15 @@ COMMAND GUIDELINES:
 - AVOID dx commands - they have complex syntax and high failure rates
 - Only use dx if traditional commands cannot achieve the goal
 - Use commands appropriate for {dump_type}-mode dumps
-- Be specific with commands - use actual command syntax"""
+- Be specific with commands - use actual command syntax
+
+CRITICAL - COMMAND SYNTAX RULES:
+- Generate ONLY pure WinDbg commands - NEVER use PowerShell syntax
+- FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_
+- INVALID EXAMPLES: '~*e !clrstack | findstr Build', '!dumpheap -mt X | foreach {{ !do $_ }}'
+- VALID EXAMPLES: '~*e !clrstack', '!dumpheap -stat', '!syncblk', '!do <address>'
+- For filtering: Use WinDbg native commands (e.g., ~*e runs on all threads)
+- For batch operations: Suggest one representative command, not loops"""
         
         response = self.llm.invoke(prompt)
         hypothesis_data = self._extract_json(response.content)
@@ -176,6 +184,27 @@ COMMAND GUIDELINES:
         for cmd_index in range(len(commands_to_execute)):
             cmd = commands_to_execute[cmd_index]
             
+            # Validate command syntax - reject PowerShell constructs
+            invalid_syntax = ['| foreach', '| findstr', '| grep', '| where', '| select', '$_']
+            if any(invalid in cmd.lower() for invalid in invalid_syntax):
+                console.print(f"  [red]✗ Invalid command syntax - contains PowerShell operators[/red]")
+                console.print(f"  [yellow]Skipping: {cmd}[/yellow]")
+                console.print(f"  [dim]Use pure WinDbg commands only (no pipes, foreach, findstr, etc.)[/dim]")
+                # Mark as failed so LLM learns to avoid this syntax
+                evidence_collected.append({
+                    'command': cmd,
+                    'output': 'Error: Invalid command syntax - PowerShell operators not supported',
+                    'finding': '',
+                    'significance': '',
+                    'confidence': 'medium',
+                    'failed': True,
+                    'evidence_type': 'inline',
+                    'evidence_id': None,
+                    'summary': None,
+                    'key_findings': []
+                })
+                break  # Skip to next command
+            
             for attempt in range(max_retries_per_command + 1):
                 # Only print command on first attempt (avoid duplicate printing after "Retrying with:")
                 if attempt == 0:
@@ -187,14 +216,31 @@ COMMAND GUIDELINES:
                     console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {cmd}")
                     
                     # Build previous evidence for placeholder resolution
+                    # IMPORTANT: Need full output for accurate placeholder resolution, not just summaries
                     previous_evidence = []
                     if evidence_collected:
-                        previous_evidence.extend([{
-                            'command': ev.command,
-                            'output': ev.output,
-                            'summary': ev.summary or '',
-                            'evidence_type': ev.evidence_type
-                        } for ev in evidence_collected])
+                        for ev in evidence_collected:
+                            evidence_dict = {
+                                'command': ev.get('command'),
+                                'summary': ev.get('summary', ''),
+                                'evidence_type': ev.get('evidence_type', 'inline')
+                            }
+                            
+                            # For external evidence, fetch full output from database for placeholder resolution
+                            if ev.get('evidence_type') == 'external' and ev.get('evidence_id'):
+                                try:
+                                    full_output = self.debugger.evidence_store.retrieve_evidence(ev['evidence_id'])
+                                    evidence_dict['output'] = full_output
+                                    console.print(f"  [dim]Fetched full output for placeholder resolution ({len(full_output)} chars)[/dim]")
+                                except Exception as e:
+                                    console.print(f"  [dim yellow]Warning: Could not retrieve full output: {e}[/dim yellow]")
+                                    # Fall back to summary if retrieval fails
+                                    evidence_dict['output'] = ev.get('output', '')
+                            else:
+                                # Inline evidence - output is already complete
+                                evidence_dict['output'] = ev.get('output', '')
+                            
+                            previous_evidence.append(evidence_dict)
                     
                     resolved_cmd, success, message = resolve_command_placeholders(cmd, previous_evidence)
                     
@@ -292,7 +338,8 @@ Return JSON:
                     'failed': failed,
                     'evidence_type': evidence_type,
                     'evidence_id': evidence_id,
-                    'summary': analysis.get('summary') if analysis else None
+                    'summary': analysis.get('summary') if analysis else None,
+                    'key_findings': analysis.get('key_findings', []) if analysis else []
                 })
                 
                 state['commands_executed'].append(cmd)
@@ -413,13 +460,35 @@ Keep critical details like thread IDs, addresses, lock holders, and wait pattern
         for i, e in enumerate(evidence):
             cmd = e.get('command', 'unknown')
             
-            # Check if this is external evidence with analysis
-            if e.get('evidence_type') == 'external' and e.get('summary'):
-                # Use the analyzed summary instead of truncating raw output
-                processed = f"[Large output analyzed externally]\nSummary: {e.get('summary')}"
-                console.print(f"[dim]  Evidence {i+1}: Using analyzed summary from evidence store[/dim]")
+            # Check if we have an analyzer summary (prefer this regardless of evidence type)
+            if e.get('summary'):
+                # Use the analyzer's summary AND findings - provides structured insights
+                evidence_type = e.get('evidence_type', 'unknown')
+                summary_text = e.get('summary')
+                
+                # Build complete analysis with summary + key findings
+                analysis_parts = [f"Summary: {summary_text}"]
+                
+                # Add key findings if available (critical for detailed diagnosis)
+                key_findings = e.get('key_findings', [])
+                if key_findings:
+                    analysis_parts.append("\nKey Findings:")
+                    for finding in key_findings[:10]:  # Limit to top 10 findings
+                        analysis_parts.append(f"  - {finding}")
+                
+                processed = f"[Analyzed by specialized analyzer]\n" + "\n".join(analysis_parts)
+                console.print(f"[dim]  Evidence {i+1}: Using analyzer summary ({evidence_type})[/dim]")
+                
+                # Always show summary content when analyzer was used (valuable insight)
+                console.print(f"[dim cyan]    {summary_text[:400]}{'...' if len(summary_text) > 400 else ''}[/dim cyan]")
+                if key_findings:
+                    console.print(f"[dim cyan]    + {len(key_findings)} key findings[/dim cyan]")
+            elif e.get('evidence_type') == 'external':
+                # External evidence without summary (shouldn't happen but handle gracefully)
+                processed = "[Large output stored externally, summary unavailable]"
+                console.print(f"[yellow]  Evidence {i+1}: External evidence missing summary[/yellow]")
             else:
-                # Inline evidence - include up to MAX_SINGLE, truncate if larger
+                # No summary available - use raw output (fallback for non-analyzed commands)
                 output = e.get('output', '')
                 
                 if len(output) <= MAX_SINGLE:
@@ -728,6 +797,12 @@ IMPORTANT:
 - If 'dx' commands failed, use traditional SOS commands like !dumpheap, !do, !gcroot
 - Focus on different diagnostic approaches
 - Attempt #{inconclusive_count}/2 - make it count!
+
+COMMAND SYNTAX REQUIREMENTS:
+- Use ONLY pure WinDbg commands - NO PowerShell syntax
+- FORBIDDEN: '| foreach', '| findstr', '| grep', '| where', '$_', pipes
+- VALID: '!threads', '~*e !clrstack', '!dumpheap -stat', '!syncblk'
+- If you need filtering, the tool will handle it - just provide the base command
 
 Return JSON:
 {{

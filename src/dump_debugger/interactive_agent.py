@@ -252,11 +252,11 @@ class InteractiveChatAgent:
             for i, evidence in enumerate(context['relevant_evidence'][:10], 1):  # Increased from 5 to 10
                 evidence_summary += f"\n{i}. Command: {evidence.get('command', 'N/A')}\n"
                 
-                # Show summary for external evidence, output for inline
-                if evidence.get('evidence_type') == 'external' and evidence.get('summary'):
+                # Prefer analyzer summary if available (regardless of evidence type)
+                if evidence.get('summary'):
                     evidence_summary += f"   Summary: {evidence['summary'][:2000]}\n"
                 elif evidence.get('output'):
-                    # For inline evidence or no summary, show output
+                    # Fallback to raw output if no summary available
                     output_preview = evidence['output'][:2000]
                     evidence_summary += f"   Output: {output_preview}\n"
                 
