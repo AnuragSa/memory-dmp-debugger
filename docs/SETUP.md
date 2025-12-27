@@ -24,7 +24,7 @@ Complete guide for setting up and configuring the Memory Dump Debugger with vari
 
 ```powershell
 # Navigate to the repository root directory
-cd C:\Anurag\projects\debugger\memory-dmp-debugger  # Adjust path to your location
+cd C:\path\to\memory-dmp-debugger  # Adjust path to your location
 ```
 
 ### 2. Install uv (Package Manager)
