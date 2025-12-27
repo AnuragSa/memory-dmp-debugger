@@ -58,7 +58,47 @@ class InvestigatorAgent:
         if efficient_cmds:
             cmd_suggestions = "\n\nSUGGESTED EFFICIENT COMMANDS:\n" + "\n".join(f"- {cmd}" for cmd in efficient_cmds[:3])
         
-        prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.
+        # Check if task describes multiple commands (look for "then", "and then", "followed by", etc.)
+        multi_step_indicators = [' then ', ' and then ', ' followed by ', ', then ', ',then']
+        is_multi_step = any(indicator in task.lower() for indicator in multi_step_indicators)
+        
+        if is_multi_step:
+            prompt = f"""You are an expert Windows debugger. The task describes MULTIPLE commands to execute in sequence.
+
+CONFIRMED HYPOTHESIS: {hypothesis}
+INVESTIGATION TASK: {task}
+DUMP SUPPORTS DATA MODEL: {supports_dx}
+Previous Evidence: {len(prev_evidence)} items
+
+STRICT INSTRUCTIONS:
+1. Extract ONLY the commands explicitly mentioned in the task description
+2. Do NOT add extra commands or "helpful" suggestions
+3. Do NOT substitute different commands even if they seem more efficient
+4. If the task says "!dumpheap -mt XXXXX then !do on objects", return exactly those commands
+5. Preserve the exact command syntax mentioned in the task
+6. For ranges like "5-10 objects", use the middle value (e.g., 7 objects)
+
+CRITICAL COMMAND SYNTAX RULES:
+- ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
+- FORBIDDEN: pipes (|), foreach, findstr, grep, where-object, select-object, $_ variables
+- Extract exact commands mentioned in the task (e.g., if task says "!threadpool", use "!threadpool")
+- For "!do on N objects" type commands, use a placeholder address like "!do <addr>" (one command per object)
+
+Return ONLY valid JSON in this exact format:
+{{
+    "commands": ["command1", "command2", ...],
+    "rationale": "extracted commands exactly as mentioned in task"
+}}
+
+EXAMPLES:
+Task: "Run '!dumpheap -stat' then '!do' on 3 objects"
+Response: {{"commands": ["!dumpheap -stat", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap -stat followed by !do on 3 objects"}}
+
+Task: "Run '!dumpheap -mt 00007ff8' then '!do' on 5-10 Thread objects"
+Response: {{"commands": ["!dumpheap -mt 00007ff8", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap followed by !do on 7 Thread objects (middle of 5-10 range)"}}
+"""
+        else:
+            prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.
 
 CONFIRMED HYPOTHESIS: {hypothesis}
 INVESTIGATION TASK: {task}
@@ -69,6 +109,14 @@ Previous Evidence: {len(prev_evidence)} items
 
 Think like an expert debugger - you know WHAT the problem is (hypothesis confirmed), now find WHERE and WHY.
 {"PREFER 'dx' commands with filters (.Select, .Where, .Take) for concise output." if supports_dx else "Use traditional WinDbg/SOS commands."}
+
+CRITICAL COMMAND SYNTAX RULES:
+1. ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
+2. FORBIDDEN: pipes (|), foreach, findstr, grep, where-object, select-object, $_ variables
+3. If the task mentions a specific command (like "!dumpheap -stat"), use that exact command or close variant
+4. Use WinDbg filtering: ~*e, .foreach, s -[d|a|u], !dumpheap -mt, etc.
+5. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -stat", "dx @$curthread"
+6. INVALID examples: "!clrstack | findstr", "~*e !clrstack | where", "!do $addr | foreach"
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -82,6 +130,7 @@ Return ONLY valid JSON in this exact format:
         ])
         
         # Parse JSON response
+        commands_to_execute = []
         try:
             content = response.content.strip()
             # Remove markdown code blocks if present
@@ -93,10 +142,34 @@ Return ONLY valid JSON in this exact format:
                         content = content[4:]
             
             result = json.loads(content.strip())
-            command = result['command'].strip()
-            rationale = result.get('rationale', '')
             
-            console.print(f"  [dim]→ {command}[/dim]")
+            # Extract commands (single or multiple)
+            if 'commands' in result:
+                # Multi-step task
+                commands_to_execute = [cmd.strip() for cmd in result['commands']]
+                rationale = result.get('rationale', '')
+            else:
+                # Single command task
+                commands_to_execute = [result['command'].strip()]
+                rationale = result.get('rationale', '')
+            
+            # Validate all commands against PowerShell syntax
+            powershell_patterns = ['| foreach', '| findstr', '| grep', '| where', '| select', '$_']
+            cleaned_commands = []
+            for cmd in commands_to_execute:
+                if any(pattern in cmd.lower() for pattern in powershell_patterns):
+                    console.print(f"[yellow]⚠ Invalid command (contains PowerShell syntax): {cmd}[/yellow]")
+                    # Use fallback: extract the WinDbg part before the pipe
+                    if '|' in cmd:
+                        cmd = cmd.split('|')[0].strip()
+                        console.print(f"[yellow]  Cleaned to: {cmd}[/yellow]")
+                cleaned_commands.append(cmd)
+            
+            commands_to_execute = cleaned_commands
+            
+            if len(commands_to_execute) > 1:
+                console.print(f"  [dim]→ Executing {len(commands_to_execute)} commands in sequence[/dim]")
+            
             if rationale and state.get('show_command_output'):
                 console.print(f"  [dim italic]{rationale}[/dim italic]")
                 
@@ -105,58 +178,126 @@ Return ONLY valid JSON in this exact format:
             console.print(f"[yellow]Raw response: {response.content[:200]}[/yellow]")
             # Fallback: extract first line that looks like a command
             lines = response.content.strip().split('\n')
-            command = lines[0].strip()
-            console.print(f"  [dim]→ {command} (fallback extraction)[/dim]")
+            commands_to_execute = [lines[0].strip()]
+            console.print(f"  [dim]→ {commands_to_execute[0]} (fallback extraction)[/dim]")
         
-        # Execute command with evidence analysis
-        result = self.debugger.execute_command_with_analysis(
-            command=command,
-            intent=f"Investigating: {task}"
-        )
-        
-        # Extract output properly (it's a dict!)
-        if isinstance(result, dict):
-            output_str = result.get('output', '')
-            evidence_type = result.get('evidence_type', 'inline')
-            evidence_id = result.get('evidence_id')
-            analysis = result.get('analysis')
-        else:
-            output_str = str(result)
-            evidence_type = 'inline'
-            evidence_id = None
-            analysis = None
-        
-        # Create evidence entry
-        # For external evidence, output_str is already the summary (set by execute_command_with_analysis)
-        # For inline evidence, truncate if needed to save memory
-        if evidence_type == 'external':
-            # Already a summary, use as-is
-            output_for_state = output_str
-        else:
-            # Inline evidence - truncate to reasonable size for state
-            output_for_state = output_str[:20000] if len(output_str) > 20000 else output_str
-        
-        evidence: Evidence = {
-            'command': command,
-            'output': output_for_state,
-            'finding': f"Executed for task: {task}",
-            'significance': "Investigating confirmed hypothesis",
-            'confidence': 'medium',
-            'evidence_type': evidence_type,
-            'evidence_id': evidence_id,
-            'summary': analysis.get('summary') if analysis else None
-        }
-        
-        # Update evidence inventory
+        # Execute all commands and collect evidence
         inventory = dict(state.get('evidence_inventory', {}))
         if task not in inventory:
             inventory[task] = []
-        inventory[task].append(evidence)
         
-        # Limit commands_executed to prevent bloat
-        all_commands = state.get('commands_executed', []) + [command]
-        if len(all_commands) > 30:
-            all_commands = all_commands[-30:]
+        all_commands = list(state.get('commands_executed', []))
+        
+        # Track outputs and addresses for placeholder resolution
+        previous_outputs = []
+        available_addresses = []
+        addr_index = 0
+        
+        for i, command in enumerate(commands_to_execute):
+            # Resolve placeholders like <addr> from previous outputs
+            if '<addr>' in command:
+                if not available_addresses and previous_outputs:
+                    # Extract addresses from most recent output (first time)
+                    import re
+                    last_output = previous_outputs[-1]
+                    
+                    # Look for heap addresses (common in !dumpheap output)
+                    # Pattern matches 12-16 hex digits (typical object addresses)
+                    addr_pattern = r'\b[0-9a-f]{12,16}\b'
+                    addresses = re.findall(addr_pattern, last_output.lower())
+                    
+                    # Filter out common non-address patterns (MTs, sizes, counts)
+                    # Keep only values that look like object addresses (typically start with 0x or higher values)
+                    available_addresses = [addr for addr in addresses if len(addr) >= 14]
+                    
+                    if available_addresses:
+                        console.print(f"  [dim cyan]→ Found {len(available_addresses)} addresses for placeholder resolution[/dim cyan]")
+                
+                if available_addresses:
+                    # Use next available address (cycle if we run out)
+                    actual_addr = available_addresses[addr_index % len(available_addresses)]
+                    command = command.replace('<addr>', actual_addr)
+                    addr_index += 1
+                    console.print(f"  [dim cyan]→ Resolved: {command}[/dim cyan]")
+                else:
+                    console.print(f"[yellow]⚠ No addresses available for placeholder resolution in: {command}[/yellow]")
+                    continue  # Skip this command
+            
+            if len(commands_to_execute) > 1:
+                console.print(f"  [dim]→ Step {i+1}/{len(commands_to_execute)}: {command}[/dim]")
+            else:
+                console.print(f"  [dim]→ {command}[/dim]")
+            
+            # Execute command with evidence analysis
+            result = self.debugger.execute_command_with_analysis(
+                command=command,
+                intent=f"Investigating: {task} (step {i+1}/{len(commands_to_execute)})"
+            )
+            
+            # Extract output properly (it's a dict!)
+            if isinstance(result, dict):
+                output_str = result.get('output', '')
+                evidence_type = result.get('evidence_type', 'inline')
+                evidence_id = result.get('evidence_id')
+                analysis = result.get('analysis')
+            else:
+                output_str = str(result)
+                evidence_type = 'inline'
+                evidence_id = None
+                analysis = None
+            
+            # Display results with same visibility as hypothesis testing phase
+            if state.get('show_command_output') and output_str:
+                # Show summary if available (analyzer output)
+                if analysis and analysis.get('summary'):
+                    console.print(f"[dim cyan]  Analysis: {analysis['summary'][:300]}{'...' if len(analysis['summary']) > 300 else ''}[/dim cyan]")
+                    # Show key findings if available
+                    key_findings = analysis.get('key_findings', [])
+                    if key_findings:
+                        console.print(f"[dim cyan]  + {len(key_findings)} key findings[/dim cyan]")
+                        for finding in key_findings[:3]:  # Show top 3
+                            console.print(f"[dim cyan]    • {finding}[/dim cyan]")
+                else:
+                    # No analysis - show raw output preview
+                    preview = output_str[:200] if len(output_str) > 200 else output_str
+                    console.print(f"[dim cyan]  Result: {preview}[/dim cyan]")
+            
+            # Create evidence entry
+            # For external evidence, output_str is already the summary (set by execute_command_with_analysis)
+            # For inline evidence, truncate if needed to save memory
+            if evidence_type == 'external':
+                # Already a summary, use as-is
+                output_for_state = output_str
+            else:
+                # Inline evidence - truncate to reasonable size for state
+                output_for_state = output_str[:20000] if len(output_str) > 20000 else output_str
+            
+            evidence: Evidence = {
+                'command': command,
+                'output': output_for_state,
+                'finding': f"Executed for task: {task} (step {i+1}/{len(commands_to_execute)})",
+                'significance': "Investigating confirmed hypothesis",
+                'confidence': 'medium',
+                'evidence_type': evidence_type,
+                'evidence_id': evidence_id,
+                'summary': analysis.get('summary') if analysis else None
+            }
+            
+            inventory[task].append(evidence)
+            all_commands.append(command)
+            
+            # Store output for placeholder resolution in next commands
+            if evidence_type == 'external' and evidence_id:
+                # For external evidence, retrieve full output
+                full_output = self.debugger.evidence_store.retrieve_evidence(evidence_id)
+                previous_outputs.append(full_output if full_output else output_str)
+            else:
+                # For inline evidence, use the output directly
+                previous_outputs.append(output_str)
+            
+            # Limit commands_executed to prevent bloat
+            if len(all_commands) > 30:
+                all_commands = all_commands[-30:]
         
         return {
             'evidence_inventory': inventory,

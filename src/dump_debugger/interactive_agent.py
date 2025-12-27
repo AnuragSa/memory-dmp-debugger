@@ -285,7 +285,12 @@ Respond in JSON format:
     "has_sufficient_evidence": true/false,
     "reasoning": "Brief explanation of why we do or don't have enough information",
     "suggested_commands": ["command1", "command2"] // Only if more investigation needed
-}}"""
+}}
+
+CRITICAL - If suggesting commands:
+- Use ONLY pure WinDbg commands - NO PowerShell syntax
+- FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_
+- VALID: '!threads', '~*e !clrstack', '!dumpheap -stat', '!syncblk'"""
 
         messages = [
             SystemMessage(content="You are an expert Windows crash dump analyst."),
@@ -349,6 +354,14 @@ Respond in JSON format:
         previous_evidence.extend(new_evidence)
         
         for command in suggested_commands[:max_commands_per_iteration]:
+            # Validate command syntax - reject PowerShell constructs
+            invalid_syntax = ['| foreach', '| findstr', '| grep', '| where', '| select', '$_']
+            if any(invalid in command.lower() for invalid in invalid_syntax):
+                console.print(f"  [red]✗ Invalid command syntax - contains PowerShell operators[/red]")
+                console.print(f"  [yellow]Skipping: {command}[/yellow]")
+                console.print(f"  [dim]Use pure WinDbg commands only (no pipes, foreach, findstr, etc.)[/dim]")
+                continue
+            
             # Check for placeholders and try to resolve them
             if detect_placeholders(command):
                 console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {command}")
@@ -447,6 +460,14 @@ AVAILABLE COMMANDS:
 - For general info: lm, !process, !peb, .lastevent
 
 Generate 1-5 specific commands that will help answer the question.
+
+CRITICAL COMMAND SYNTAX RULES:
+- Use ONLY pure WinDbg/CDB commands - NEVER PowerShell syntax
+- FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_, any PowerShell operators
+- INVALID EXAMPLES: '~*e !clrstack | findstr Thread', '!dumpheap | foreach', '!threads | grep'
+- VALID EXAMPLES: '!threads', '~*e !clrstack', '!dumpheap -stat', '!syncblk', '!do <address>'
+- For filtering: Use WinDbg native commands only (e.g., ~*e applies to all threads)
+- For batch: Suggest single representative commands, not loops
 
 Respond in JSON format:
 {{
