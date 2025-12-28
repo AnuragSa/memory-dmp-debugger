@@ -41,8 +41,10 @@ class DebuggerWrapper:
         self._reader_thread = None
         self._command_delimiter = f"===COMMAND_COMPLETE_{id(self)}==="
         
+        # Track current thread context for cache keying
+        self._current_thread = None  # Format: "0x1234" or thread index
+        
         # Evidence management
-        self.session_dir = session_dir
         self.evidence_store = None
         self.evidence_analyzer = None
         self.embeddings_client = None
@@ -398,7 +400,7 @@ class DebuggerWrapper:
         try:
             # Check cache first - dumps are static, commands return same output
             if self.evidence_store:
-                cached_evidence_id = self.evidence_store.find_by_command(command_stripped)
+                cached_evidence_id = self.evidence_store.find_by_command(command_stripped, current_thread=self._current_thread)
                 if cached_evidence_id:
                     # Return cached result without executing
                     try:
@@ -454,6 +456,19 @@ class DebuggerWrapper:
                 thread_switch = thread_switch_match.group(1)
                 actual_command = thread_switch_match.group(2)
                 
+                # Update current thread context
+                thread_num_match = re.match(r'^~+(\d+)s', thread_switch)
+                if thread_num_match:
+                    self._current_thread = thread_num_match.group(1)
+                elif '~~[' in thread_switch:
+                    # OS thread ID switch
+                    tid_match = re.search(r'\[(?:0x)?([0-9a-fA-F]+)\]', thread_switch)
+                    if tid_match:
+                        self._current_thread = f"0x{tid_match.group(1)}"
+                else:
+                    # ~*s or ~~s - not a specific thread
+                    self._current_thread = None
+                
                 if actual_command:
                     # Send thread switch first and wait for context to update
                     self._send_command(thread_switch)
@@ -468,7 +483,7 @@ class DebuggerWrapper:
                     # Just a thread switch command with no following command
                     self._send_command(command_stripped)
             else:
-                # Regular command without thread switch
+                # Regular command without thread switch - thread context unchanged
                 self._send_command(command_stripped)
             
             # Send delimiter command to mark end of output
@@ -544,7 +559,8 @@ class DebuggerWrapper:
                     output=output,
                     summary=None,  # Analysis happens in execute_command_with_analysis for large outputs
                     key_findings=None,
-                    embedding=embedding
+                    embedding=embedding,
+                    current_thread=self._current_thread  # Pass thread context for proper caching
                 )
                 if self.show_output and len(output) > 10000:
                     console.print(f"[dim]Cached as {evidence_id}[/dim]")
@@ -628,7 +644,8 @@ class DebuggerWrapper:
             existing_evidence_id = self.evidence_store.find_recent_duplicate(
                 command=command,
                 output=output,
-                max_age_seconds=None  # Session-wide cache for dump analysis
+                max_age_seconds=None,  # Session-wide cache for dump analysis
+                current_thread=self._current_thread  # Pass thread context for proper caching
             )
             
             if existing_evidence_id:
@@ -693,7 +710,8 @@ class DebuggerWrapper:
                     output=output,
                     summary=analysis['summary'],
                     key_findings=analysis['key_findings'],
-                    embedding=embedding
+                    embedding=embedding,
+                    current_thread=self._current_thread  # Pass thread context for proper caching
                 )
             
             # Store chunk analyses

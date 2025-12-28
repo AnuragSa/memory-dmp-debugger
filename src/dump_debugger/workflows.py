@@ -110,13 +110,19 @@ Previous Evidence: {len(prev_evidence)} items
 Think like an expert debugger - you know WHAT the problem is (hypothesis confirmed), now find WHERE and WHY.
 {"PREFER 'dx' commands with filters (.Select, .Where, .Take) for concise output." if supports_dx else "Use traditional WinDbg/SOS commands."}
 
+STRICT COMMAND SELECTION RULES:
+1. If task explicitly mentions a command (e.g., "Use !do", "Run !clrstack"), use that EXACT command
+2. Do NOT substitute with different commands even if they seem more efficient
+3. If task says "!do on objects", first find objects with !dumpheap, then we'll run !do
+4. If task says "identify objects", use !dumpheap -type or !dumpheap -stat to enumerate
+5. Follow task intent: finding objects ≠ inspecting objects
+
 CRITICAL COMMAND SYNTAX RULES:
 1. ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
 2. FORBIDDEN: pipes (|), foreach, findstr, grep, where-object, select-object, $_ variables
-3. If the task mentions a specific command (like "!dumpheap -stat"), use that exact command or close variant
-4. Use WinDbg filtering: ~*e, .foreach, s -[d|a|u], !dumpheap -mt, etc.
-5. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -stat", "dx @$curthread"
-6. INVALID examples: "!clrstack | findstr", "~*e !clrstack | where", "!do $addr | foreach"
+3. Use WinDbg filtering: ~*e, .foreach, s -[d|a|u], !dumpheap -mt, etc.
+4. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -stat", "dx @$curthread"
+5. INVALID examples: "!clrstack | findstr", "~*e !clrstack | where", "!do $addr | foreach"
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -188,76 +194,36 @@ Return ONLY valid JSON in this exact format:
         
         all_commands = list(state.get('commands_executed', []))
         
-        # Track outputs and addresses for placeholder resolution
+        # Track outputs for placeholder resolution
         previous_outputs = []
-        available_values = {}  # Store different types of values (MTs, addresses, etc.)
         
         for i, command in enumerate(commands_to_execute):
             # Detect any placeholder pattern <...>
             import re
-            placeholder_pattern = r'<([^>]+)>'
-            placeholders = re.findall(placeholder_pattern, command)
+            from dump_debugger.utils import detect_placeholders, resolve_command_placeholders
             
-            if placeholders and previous_outputs:
-                console.print(f"  [cyan]⚠ Detected placeholders in: {command}[/cyan]")
+            # Build evidence list for placeholder resolution
+            evidence_for_resolution = []
+            for j, output in enumerate(previous_outputs):
+                evidence_for_resolution.append({
+                    'command': commands_to_execute[j] if j < len(commands_to_execute) else 'unknown',
+                    'output': output,
+                    'evidence_type': 'inline'
+                })
+            
+            # Check for placeholders and try to resolve them
+            if detect_placeholders(command):
+                console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {command}")
+                resolved_command, success, message = resolve_command_placeholders(command, evidence_for_resolution)
                 
-                # Extract values from previous outputs if not already done
-                if not available_values and previous_outputs:
-                    last_output = previous_outputs[-1]
-                    
-                    # Parse different output types
-                    # 1. MethodTable addresses from !dumpheap -stat (first column before "MT")
-                    mt_pattern = r'^([0-9a-f]{12,16})\s+\d+\s+\d+\s+[\w\.]+'
-                    mt_matches = re.findall(mt_pattern, last_output.lower(), re.MULTILINE)
-                    if mt_matches:
-                        available_values['mt'] = mt_matches
-                        console.print(f"  [dim cyan]→ Found {len(mt_matches)} MethodTable addresses[/dim cyan]")
-                    
-                    # 2. Object addresses from !dumpheap output (address column)
-                    addr_pattern = r'^([0-9a-f]{12,16})\s+([0-9a-f]{12,16})\s+\d+'
-                    addr_matches = re.findall(addr_pattern, last_output.lower(), re.MULTILINE)
-                    if addr_matches:
-                        # Extract just the addresses (first group)
-                        available_values['addr'] = [match[0] for match in addr_matches]
-                        console.print(f"  [dim cyan]→ Found {len(addr_matches)} object addresses[/dim cyan]")
-                
-                # Resolve placeholders
-                for placeholder_text in placeholders:
-                    placeholder_full = f'<{placeholder_text}>'
-                    
-                    # Determine type of placeholder
-                    if 'mt' in placeholder_text.lower() or 'methodtable' in placeholder_text.lower():
-                        # MethodTable placeholder
-                        if 'mt' in available_values and available_values['mt']:
-                            # Use first MT (usually the largest/most significant)
-                            resolved_value = available_values['mt'][0]
-                            command = command.replace(placeholder_full, resolved_value)
-                            console.print(f"  [green]✓ Resolved {placeholder_full} to MT: {resolved_value}[/green]")
-                        else:
-                            console.print(f"[yellow]⚠ No MT addresses available for: {placeholder_full}[/yellow]")
-                            continue
-                    elif 'addr' in placeholder_text.lower() or 'object' in placeholder_text.lower():
-                        # Object address placeholder
-                        if 'addr' in available_values and available_values['addr']:
-                            resolved_value = available_values['addr'][0]
-                            command = command.replace(placeholder_full, resolved_value)
-                            console.print(f"  [green]✓ Resolved {placeholder_full} to address: {resolved_value}[/green]")
-                        else:
-                            console.print(f"[yellow]⚠ No object addresses available for: {placeholder_full}[/yellow]")
-                            continue
-                    else:
-                        # Generic placeholder - try any available value
-                        if 'mt' in available_values and available_values['mt']:
-                            resolved_value = available_values['mt'][0]
-                            command = command.replace(placeholder_full, resolved_value)
-                            console.print(f"  [green]✓ Resolved {placeholder_full} to: {resolved_value}[/green]")
-                        elif 'addr' in available_values and available_values['addr']:
-                            resolved_value = available_values['addr'][0]
-                            command = command.replace(placeholder_full, resolved_value)
-                            console.print(f"  [green]✓ Resolved {placeholder_full} to: {resolved_value}[/green]")
-                        else:
-                            console.print(f"[yellow]⚠ No values available for placeholder: {placeholder_full}[/yellow]")
-                            continue
+                if success:
+                    console.print(f"  [green]✓ Resolved to:[/green] {resolved_command}")
+                    command = resolved_command
+                else:
+                    console.print(f"  [red]✗ {message}[/red]")
+                    console.print(f"  [yellow]⚠ Skipping command with unresolved placeholders[/yellow]")
+                    # Skip this command entirely
+                    continue
             
             if len(commands_to_execute) > 1:
                 console.print(f"  [dim]→ Step {i+1}/{len(commands_to_execute)}: {command}[/dim]")
@@ -330,6 +296,24 @@ Return ONLY valid JSON in this exact format:
             else:
                 # For inline evidence, use the output directly
                 previous_outputs.append(output_str)
+            
+            # Auto-generate follow-up !do commands if task mentions "!do" but we only found objects
+            if ('!do' in task.lower() or '!dumpobj' in task.lower()) and '!dumpheap' in command.lower() and i == len(commands_to_execute) - 1:
+                # Task wants !do inspection but we only ran !dumpheap
+                # Extract object addresses from output
+                import re
+                addr_pattern = r'^([0-9a-f]{12,16})\s+[0-9a-f]{12,16}\s+\d+'
+                addr_matches = re.findall(addr_pattern, output_str.lower(), re.MULTILINE)
+                
+                if addr_matches:
+                    # Limit to reasonable number (5-7 objects)
+                    max_objects = 7
+                    num_to_inspect = min(len(addr_matches), max_objects)
+                    console.print(f"[cyan]  → Task requested !do inspection, auto-generating {num_to_inspect} !do commands[/cyan]")
+                    
+                    # Add !do commands to execution queue
+                    for addr in addr_matches[:num_to_inspect]:
+                        commands_to_execute.append(f"!do {addr}")
             
             # Limit commands_executed to prevent bloat
             if len(all_commands) > 30:
@@ -609,13 +593,9 @@ class ReportWriterAgentV2:
                     # Use analyzed summary for external evidence
                     output_preview = f"[Analyzed externally]\n{e.get('summary')}"
                 else:
-                    # Include command and smart output preview for inline evidence
-                    output = e.get('output', '')
-                    if len(output) <= 3000:
-                        output_preview = output
-                    else:
-                        # Show head + tail for context
-                        output_preview = f"{output[:1500]}\n[... {len(output) - 3000} chars ...]\n{output[-1500:]}"
+                    # Include full output for inline evidence
+                    # Inline evidence is already kept at reasonable size (20KB max from storage)
+                    output_preview = e.get('output', '')
                 
                 entry = f"- Command: {cmd}\n  Output: {output_preview}"
                 if finding:

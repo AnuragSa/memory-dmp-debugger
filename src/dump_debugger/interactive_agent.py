@@ -325,6 +325,17 @@ CRITICAL - If suggesting commands:
         Returns:
             Tuple of (commands_executed, new_evidence)
         """
+        # Reset to default thread context for clean investigation
+        # This ensures commands run in a neutral context unless the question is thread-specific
+        if not any(keyword in question.lower() for keyword in ['thread', 'stack', 'specific thread']):
+            console.print("[dim]Resetting to thread 0 for clean investigation...[/dim]")
+            try:
+                reset_result = self.debugger.execute_command("~0s", timeout=5)
+                if reset_result.get('success'):
+                    console.print("[dim green]✓ Reset to thread 0[/dim green]")
+            except Exception as e:
+                console.print(f"[dim yellow]⚠ Could not reset thread context: {e}[/dim yellow]")
+        
         # Get suggested commands from previous step
         suggested_commands = getattr(self, '_suggested_commands', [])
         
@@ -592,9 +603,15 @@ Respond in JSON format:
                         # Question doesn't need detailed data - use summary
                         evidence_text += f"   Analysis: {evidence.get('summary', 'No analysis available')}\n"
                 else:
-                    # Inline evidence - use truncated output
-                    output_preview = evidence['output'][:5000]
-                    evidence_text += f"   Output: {output_preview}\n"
+                    # Inline evidence - include with smart truncation
+                    output = evidence['output']
+                    if len(output) <= 15000:
+                        # Small enough - include full output
+                        evidence_text += f"   Output: {output}\n"
+                    else:
+                        # Large inline output - show head + tail with context
+                        # This preserves beginning (command output) and end (important results)
+                        evidence_text += f"   Output (showing 5KB head + 5KB tail of {len(output)} chars):\n{output[:5000]}\n[... {len(output) - 10000} chars omitted ...]\n{output[-5000:]}\n"
         
         prompt = f"""You are answering a user's question about a Windows memory dump analysis.
 
@@ -624,7 +641,90 @@ Provide your answer now:"""
         ]
         
         response = self.llm.invoke(messages)
-        return response.content.strip()
+        answer = response.content.strip()
+        
+        # Auto-retry if LLM mentions truncation or missing data
+        truncation_indicators = [
+            'truncated', 'cut off', 'incomplete', 'missing',
+            'not visible', 'not shown', 'not available in the output',
+            'would need', 'output ends', 'output was cut'
+        ]
+        
+        if any(indicator in answer.lower() for indicator in truncation_indicators):
+            console.print("[yellow]⚠ LLM detected missing/truncated data, retrieving full outputs...[/yellow]")
+            
+            # Rebuild evidence_text with full outputs (no truncation)
+            evidence_text_full = "## Key Conclusions\n"
+            if context.get('conclusions'):
+                for conclusion in context['conclusions']:
+                    evidence_text_full += f"- {conclusion}\n"
+                evidence_text_full += "\n"
+            
+            if context.get('relevant_evidence'):
+                evidence_text_full += "## Relevant Evidence from Prior Investigation\n"
+                for i, evidence in enumerate(context['relevant_evidence'][:5], 1):
+                    evidence_text_full += f"\n{i}. `{evidence.get('command', 'N/A')}`\n"
+                    finding = evidence.get('finding', '')
+                    if finding:
+                        evidence_text_full += f"   {finding[:2000]}\n"
+            
+            if new_evidence:
+                evidence_text_full += "\n## New Investigation Results (FULL OUTPUTS)\n"
+                
+                for i, evidence in enumerate(new_evidence, 1):
+                    evidence_text_full += f"\n{i}. `{evidence['command']}`\n"
+                    
+                    if evidence.get('evidence_type') == 'external':
+                        # Retrieve full output from external storage
+                        if evidence.get('evidence_id'):
+                            full_output = self.evidence_retriever.evidence_store.retrieve_evidence(evidence['evidence_id'])
+                            if full_output:
+                                # Limit to 50KB to avoid token explosion
+                                output_to_send = full_output[:50000] if len(full_output) > 50000 else full_output
+                                evidence_text_full += f"   Full Output ({len(full_output)} chars):\n{output_to_send}\n"
+                                console.print(f"[dim cyan]  → Retrieved full external evidence ({len(full_output)} chars)[/dim cyan]")
+                            else:
+                                evidence_text_full += f"   Analysis: {evidence.get('summary', 'No summary available')}\n"
+                        else:
+                            evidence_text_full += f"   Analysis: {evidence.get('summary', 'No summary available')}\n"
+                    else:
+                        # Inline evidence - include full output
+                        evidence_text_full += f"   Full Output:\n{evidence['output']}\n"
+            
+            # Retry with full outputs
+            prompt_retry = f"""You are answering a user's question about a Windows memory dump analysis.
+
+ORIGINAL ISSUE: {context['issue_description']}
+
+USER'S QUESTION: {question}
+
+{evidence_text_full}
+
+IMPORTANT: You previously mentioned data was truncated or missing. The FULL outputs are now provided above.
+Please re-examine the complete data and provide a thorough answer.
+
+TASK: Provide a clear, concise answer to the user's question based on the COMPLETE evidence above.
+
+GUIDELINES:
+1. Be direct and specific - answer the question with the available evidence
+2. Reference specific commands/evidence when making claims
+3. DO NOT suggest manual debugger commands for the user to run
+4. Use technical terms appropriately but explain complex concepts
+5. Format your answer in markdown
+6. Keep it concise (3-5 paragraphs max unless more detail is warranted)
+
+Provide your answer now:"""
+            
+            messages_retry = [
+                SystemMessage(content="You are an expert Windows crash dump analyst helping a user understand their dump."),
+                HumanMessage(content=prompt_retry)
+            ]
+            
+            response_retry = self.llm.invoke(messages_retry)
+            answer = response_retry.content.strip()
+            console.print("[green]✓ Retrieved full data and re-formulated answer[/green]")
+        
+        return answer
     
     def _extract_json(self, text: str) -> dict[str, Any] | None:
         """Extract JSON from LLM response that may have text before/after.

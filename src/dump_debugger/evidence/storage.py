@@ -72,7 +72,8 @@ class EvidenceStore:
         summary: str = None,
         key_findings: list[str] = None,
         embedding: list[float] = None,
-        metadata: dict = None
+        metadata: dict = None,
+        current_thread: str = None
     ) -> str:
         """Store evidence with optional analysis results.
         
@@ -83,6 +84,7 @@ class EvidenceStore:
             key_findings: List of key findings
             embedding: Embedding vector for semantic search
             metadata: Additional metadata
+            current_thread: Current debugger thread (e.g., "12" or "0x25b8") for thread-sensitive commands
             
         Returns:
             Evidence ID
@@ -90,11 +92,25 @@ class EvidenceStore:
         evidence_id = self._generate_id(command)
         output_size = len(output)
         
+        # Thread-sensitive commands should include thread context in cache key
+        thread_sensitive_commands = [
+            '!clrstack', '!dso', 'k', 'kb', 'kn', 'kp', 'kv',
+            '!do', '!dumpobj', 'r', 'dt', 'dv', '!tls'
+        ]
+        
+        # Build cache key with thread context for thread-sensitive commands
+        cache_command = command
+        if current_thread:
+            cmd_lower = command.lower().strip()
+            # Check if command is thread-sensitive
+            if any(cmd_lower.startswith(sensitive_cmd.lower()) for sensitive_cmd in thread_sensitive_commands):
+                cache_command = f"{command}@thread_{current_thread}"
+        
         # Store output to file
         file_path = self.evidence_dir / f"{evidence_id}.txt"
         file_path.write_text(output, encoding='utf-8')
         
-        # Store in database
+        # Store in database with cache_command (includes thread context for thread-sensitive commands)
         self.conn.execute("""
             INSERT INTO evidence (
                 id, session_id, command, file_path, size,
@@ -103,7 +119,7 @@ class EvidenceStore:
         """, [
             evidence_id,
             self.session_id,
-            command,
+            cache_command,  # Store with thread context for proper cache lookups
             str(file_path),
             output_size,
             summary or '',
@@ -116,43 +132,83 @@ class EvidenceStore:
         
         return evidence_id
     
-    def find_by_command(self, command: str) -> str | None:
+    def find_by_command(self, command: str, current_thread: str = None) -> str | None:
         """Find most recent evidence for a command (session-wide).
         
         For dump analysis where output is deterministic.
+        Thread-sensitive commands include thread context in lookup to prevent
+        returning cached results from different threads.
         
         Args:
             command: Command to find
+            current_thread: Current thread context (e.g., "12" or "0x25b8") for thread-sensitive commands
             
         Returns:
             Evidence ID if found, None otherwise
         """
+        # Thread-sensitive commands should include thread context in cache key
+        thread_sensitive_commands = [
+            '!clrstack', '!dso', 'k', 'kb', 'kn', 'kp', 'kv',
+            '!do', '!dumpobj', 'r', 'dt', 'dv', '!tls'
+        ]
+        
+        # Build cache key with thread context for thread-sensitive commands
+        cache_command = command
+        if current_thread:
+            cmd_lower = command.lower().strip()
+            # Check if command is thread-sensitive
+            if any(cmd_lower.startswith(sensitive_cmd.lower()) for sensitive_cmd in thread_sensitive_commands):
+                cache_command = f"{command}@thread_{current_thread}"
+        
         cursor = self.conn.execute("""
             SELECT id FROM evidence 
             WHERE command = ?
             ORDER BY timestamp DESC
             LIMIT 1
-        """, [command])
+        """, [cache_command])
         
         row = cursor.fetchone()
         return row[0] if row else None
     
-    def find_recent_duplicate(self, command: str, output: str, max_age_seconds: int = None) -> str | None:
+    def find_recent_duplicate(self, command: str, output: str, max_age_seconds: int = None, current_thread: str = None) -> str | None:
         """Check if identical evidence exists in the session.
         
         For dump analysis, dumps are static so we cache for entire session lifetime.
         For live debugging, use max_age_seconds to limit cache duration.
         
+        Thread-context-sensitive commands include thread info in cache key to prevent
+        returning cached results from different threads.
+        
         Args:
             command: Command to check
             output: Output to compare
             max_age_seconds: Maximum age in seconds (None = session lifetime for dumps)
+            current_thread: Current thread context (e.g., "12" or "0x1234")
             
         Returns:
             Evidence ID if duplicate found, None otherwise
         """
         import hashlib
         from datetime import datetime, timedelta
+        
+        # Thread-context-sensitive commands need thread info in cache key
+        thread_sensitive_commands = [
+            '!clrstack', '!dso', '!dumpstack', 'k', 'kb', 'kv', 'kp', 
+            '!eestack', 'dv', '!do', '!dumpobj', '!dumpstack'
+        ]
+        
+        # Check if command is thread-sensitive
+        is_thread_sensitive = any(
+            command.strip().lower().startswith(pattern.lower()) 
+            for pattern in thread_sensitive_commands
+        )
+        
+        # Build cache key: command + optional thread context
+        if is_thread_sensitive and current_thread:
+            # Include thread in cache key for thread-sensitive commands
+            cache_command = f"{command}@thread_{current_thread}"
+        else:
+            cache_command = command
         
         # Calculate hash of current output
         output_hash = hashlib.sha256(output.encode('utf-8')).hexdigest()
@@ -165,7 +221,7 @@ class EvidenceStore:
                 FROM evidence 
                 WHERE command = ?
                 ORDER BY timestamp DESC
-            """, [command])
+            """, [cache_command])
         else:
             # Time-limited cache for live debugging
             cutoff_time = (datetime.now() - timedelta(seconds=max_age_seconds)).isoformat()
@@ -174,7 +230,7 @@ class EvidenceStore:
                 FROM evidence 
                 WHERE command = ? AND timestamp > ?
                 ORDER BY timestamp DESC
-            """, [command, cutoff_time])
+            """, [cache_command, cutoff_time])
         
         for row in cursor:
             evidence_id, file_path, timestamp = row
