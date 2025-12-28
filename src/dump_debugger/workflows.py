@@ -190,38 +190,74 @@ Return ONLY valid JSON in this exact format:
         
         # Track outputs and addresses for placeholder resolution
         previous_outputs = []
-        available_addresses = []
-        addr_index = 0
+        available_values = {}  # Store different types of values (MTs, addresses, etc.)
         
         for i, command in enumerate(commands_to_execute):
-            # Resolve placeholders like <addr> from previous outputs
-            if '<addr>' in command:
-                if not available_addresses and previous_outputs:
-                    # Extract addresses from most recent output (first time)
-                    import re
+            # Detect any placeholder pattern <...>
+            import re
+            placeholder_pattern = r'<([^>]+)>'
+            placeholders = re.findall(placeholder_pattern, command)
+            
+            if placeholders and previous_outputs:
+                console.print(f"  [cyan]⚠ Detected placeholders in: {command}[/cyan]")
+                
+                # Extract values from previous outputs if not already done
+                if not available_values and previous_outputs:
                     last_output = previous_outputs[-1]
                     
-                    # Look for heap addresses (common in !dumpheap output)
-                    # Pattern matches 12-16 hex digits (typical object addresses)
-                    addr_pattern = r'\b[0-9a-f]{12,16}\b'
-                    addresses = re.findall(addr_pattern, last_output.lower())
+                    # Parse different output types
+                    # 1. MethodTable addresses from !dumpheap -stat (first column before "MT")
+                    mt_pattern = r'^([0-9a-f]{12,16})\s+\d+\s+\d+\s+[\w\.]+'
+                    mt_matches = re.findall(mt_pattern, last_output.lower(), re.MULTILINE)
+                    if mt_matches:
+                        available_values['mt'] = mt_matches
+                        console.print(f"  [dim cyan]→ Found {len(mt_matches)} MethodTable addresses[/dim cyan]")
                     
-                    # Filter out common non-address patterns (MTs, sizes, counts)
-                    # Keep only values that look like object addresses (typically start with 0x or higher values)
-                    available_addresses = [addr for addr in addresses if len(addr) >= 14]
-                    
-                    if available_addresses:
-                        console.print(f"  [dim cyan]→ Found {len(available_addresses)} addresses for placeholder resolution[/dim cyan]")
+                    # 2. Object addresses from !dumpheap output (address column)
+                    addr_pattern = r'^([0-9a-f]{12,16})\s+([0-9a-f]{12,16})\s+\d+'
+                    addr_matches = re.findall(addr_pattern, last_output.lower(), re.MULTILINE)
+                    if addr_matches:
+                        # Extract just the addresses (first group)
+                        available_values['addr'] = [match[0] for match in addr_matches]
+                        console.print(f"  [dim cyan]→ Found {len(addr_matches)} object addresses[/dim cyan]")
                 
-                if available_addresses:
-                    # Use next available address (cycle if we run out)
-                    actual_addr = available_addresses[addr_index % len(available_addresses)]
-                    command = command.replace('<addr>', actual_addr)
-                    addr_index += 1
-                    console.print(f"  [dim cyan]→ Resolved: {command}[/dim cyan]")
-                else:
-                    console.print(f"[yellow]⚠ No addresses available for placeholder resolution in: {command}[/yellow]")
-                    continue  # Skip this command
+                # Resolve placeholders
+                for placeholder_text in placeholders:
+                    placeholder_full = f'<{placeholder_text}>'
+                    
+                    # Determine type of placeholder
+                    if 'mt' in placeholder_text.lower() or 'methodtable' in placeholder_text.lower():
+                        # MethodTable placeholder
+                        if 'mt' in available_values and available_values['mt']:
+                            # Use first MT (usually the largest/most significant)
+                            resolved_value = available_values['mt'][0]
+                            command = command.replace(placeholder_full, resolved_value)
+                            console.print(f"  [green]✓ Resolved {placeholder_full} to MT: {resolved_value}[/green]")
+                        else:
+                            console.print(f"[yellow]⚠ No MT addresses available for: {placeholder_full}[/yellow]")
+                            continue
+                    elif 'addr' in placeholder_text.lower() or 'object' in placeholder_text.lower():
+                        # Object address placeholder
+                        if 'addr' in available_values and available_values['addr']:
+                            resolved_value = available_values['addr'][0]
+                            command = command.replace(placeholder_full, resolved_value)
+                            console.print(f"  [green]✓ Resolved {placeholder_full} to address: {resolved_value}[/green]")
+                        else:
+                            console.print(f"[yellow]⚠ No object addresses available for: {placeholder_full}[/yellow]")
+                            continue
+                    else:
+                        # Generic placeholder - try any available value
+                        if 'mt' in available_values and available_values['mt']:
+                            resolved_value = available_values['mt'][0]
+                            command = command.replace(placeholder_full, resolved_value)
+                            console.print(f"  [green]✓ Resolved {placeholder_full} to: {resolved_value}[/green]")
+                        elif 'addr' in available_values and available_values['addr']:
+                            resolved_value = available_values['addr'][0]
+                            command = command.replace(placeholder_full, resolved_value)
+                            console.print(f"  [green]✓ Resolved {placeholder_full} to: {resolved_value}[/green]")
+                        else:
+                            console.print(f"[yellow]⚠ No values available for placeholder: {placeholder_full}[/yellow]")
+                            continue
             
             if len(commands_to_execute) > 1:
                 console.print(f"  [dim]→ Step {i+1}/{len(commands_to_execute)}: {command}[/dim]")
@@ -365,10 +401,10 @@ class ReasonerAgent:
                 
                 # Check if this is external evidence with analysis
                 if e.get('evidence_type') == 'external' and e.get('summary'):
-                    # Use the analyzed summary instead of truncated raw output
-                    output_preview = f"[Large output analyzed and stored externally]\nSummary: {e.get('summary')}"
+                    # Use analyzed summary for cost efficiency (already contains key findings)
+                    output_preview = f"[Large output analyzed and stored externally]\nAnalysis: {e.get('summary')}"
                     if e.get('evidence_id'):
-                        output_preview += f"\nEvidence ID: {e.get('evidence_id')}"
+                        output_preview += f"\n[Full details available in: {e.get('evidence_id')}]"
                 else:
                     # Inline evidence - include fully (Claude 4.5 handles large contexts)
                     output = e.get('output', '')

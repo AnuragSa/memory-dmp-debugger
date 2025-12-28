@@ -401,7 +401,8 @@ CRITICAL - If suggesting commands:
                     'confidence': 'medium',
                     'evidence_type': evidence_type,
                     'evidence_id': result.get('evidence_id'),
-                    'summary': result.get('analysis', {}).get('summary') if result.get('analysis') else None
+                    'summary': result.get('analysis', {}).get('summary') if result.get('analysis') else None,
+                    'structured_data': result.get('analysis', {}).get('structured_data') if result.get('analysis') else {}
                 }
                 new_evidence.append(evidence)
                 
@@ -531,15 +532,67 @@ Respond in JSON format:
         
         if new_evidence:
             evidence_text += "\n## New Investigation Results\n"
+            
+            # Detect if question requires detailed data (type breakdowns, statistics, lists)
+            detail_keywords = ['which types', 'what types', 'breakdown', 'list of', 'top consumers', 
+                              'specific', 'exactly', 'detail', 'all the', 'each', 'individual']
+            needs_detailed_data = any(keyword in question.lower() for keyword in detail_keywords)
+            
             for i, evidence in enumerate(new_evidence, 1):
                 evidence_text += f"\n{i}. `{evidence['command']}`\n"
                 
-                # Check if this is external evidence with analysis or inline evidence
-                if evidence.get('evidence_type') == 'external' and evidence.get('summary'):
-                    # Use analyzed summary for large outputs (already captures key findings)
-                    evidence_text += f"   Analysis: {evidence['summary']}\n"
+                # Check if this is external evidence with analysis
+                if evidence.get('evidence_type') == 'external':
+                    if needs_detailed_data and evidence.get('evidence_id'):
+                        # Check if structured data is available (from analyzers like dumpheap)
+                        structured_data = evidence.get('structured_data') or {}
+                        
+                        # If we have top_consumers_summary, use that instead of full output
+                        if 'top_consumers_summary' in structured_data:
+                            evidence_text += f"   Analysis: {evidence.get('summary', 'No summary available')}\n\n"
+                            evidence_text += "   Top 20 Memory Consumers:\n"
+                            for consumer in structured_data['top_consumers_summary']:
+                                evidence_text += (
+                                    f"   {consumer['rank']}. {consumer['class_name']} - "
+                                    f"{consumer['size_formatted']} ({consumer['count']:,} objects, "
+                                    f"MT: {consumer['method_table']})\n"
+                                )
+                            console.print(f"[dim cyan]  → Using structured top consumers data[/dim cyan]")
+                        elif 'top_by_size' in structured_data:
+                            # Fallback: old format without top_consumers_summary
+                            evidence_text += f"   Analysis: {evidence.get('summary', 'No summary available')}\n\n"
+                            evidence_text += "   Top Memory Consumers:\n"
+                            for i, item in enumerate(structured_data['top_by_size'][:20], 1):
+                                # Format size
+                                size_bytes = item.get('total_size', 0)
+                                if size_bytes < 1024 * 1024:
+                                    size_str = f"{size_bytes / 1024:.1f} KB"
+                                else:
+                                    size_str = f"{size_bytes / (1024 * 1024):.1f} MB"
+                                evidence_text += (
+                                    f"   {i}. {item['class_name']} - "
+                                    f"{size_str} ({item['count']:,} objects, "
+                                    f"MT: {item['method_table']})\n"
+                                )
+                            console.print(f"[dim cyan]  → Using legacy structured data format[/dim cyan]")
+                        else:
+                            # No structured data - must retrieve full output (with safety limit)
+                            full_output = self.evidence_retriever.evidence_store.retrieve_evidence(evidence['evidence_id'])
+                            if full_output and len(full_output) <= 100000:
+                                evidence_text += f"   Detailed Output:\n{full_output}\n"
+                                console.print(f"[dim cyan]  → Retrieved full output for detailed question ({len(full_output)} chars)[/dim cyan]")
+                            else:
+                                # Too large - use summary only and warn
+                                evidence_text += f"   Analysis: {evidence.get('summary', 'No summary available')}\n"
+                                if full_output:
+                                    console.print(f"[yellow]  ⚠ Output too large ({len(full_output)} chars), using summary only. Re-run command to get structured data.[/yellow]")
+                                else:
+                                    console.print(f"[yellow]  ⚠ Could not retrieve evidence[/yellow]")
+                    else:
+                        # Question doesn't need detailed data - use summary
+                        evidence_text += f"   Analysis: {evidence.get('summary', 'No analysis available')}\n"
                 else:
-                    # Use truncated output for inline evidence
+                    # Inline evidence - use truncated output
                     output_preview = evidence['output'][:5000]
                     evidence_text += f"   Output: {output_preview}\n"
         

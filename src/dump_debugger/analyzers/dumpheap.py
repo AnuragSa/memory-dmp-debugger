@@ -72,16 +72,23 @@ class DumpHeapAnalyzer(BaseAnalyzer):
         
         # Identify top types
         top_by_count = sorted(heap_stats, key=lambda x: x["count"], reverse=True)[:10]
-        top_by_size = sorted(heap_stats, key=lambda x: x["total_size"], reverse=True)[:10]
+        top_by_size = sorted(heap_stats, key=lambda x: x["total_size"], reverse=True)[:20]
         
         # Use local LLM to interpret patterns (simple task)
         llm = self.get_llm(TaskComplexity.SIMPLE)
         interpretation = self._interpret_heap_patterns(llm, heap_stats, top_by_count, top_by_size)
         
-        # Generate summary
+        # Build concise top consumers summary (top 5 only)
+        top_5_text = "Top 5 consumers: " + ", ".join(
+            f"{item['class_name']} ({self._format_bytes(item['total_size'])})"
+            for item in top_by_size[:5]
+        )
+        
+        # Generate concise summary
         summary = (
             f"Heap contains {total_count:,} objects totaling {self._format_bytes(total_size)}. "
-            f"{interpretation}"
+            f"{interpretation} {top_5_text}. "
+            f"(Full top 20 available in structured data.)"
         )
         
         # Generate findings
@@ -111,7 +118,18 @@ class DumpHeapAnalyzer(BaseAnalyzer):
                 "unique_types": len(heap_stats),
                 "heap_stats": heap_stats,
                 "top_by_count": top_by_count[:5],
-                "top_by_size": top_by_size[:5],
+                "top_by_size": top_by_size,  # Include all top 20
+                "top_consumers_summary": [
+                    {
+                        "rank": i + 1,
+                        "method_table": item["method_table"],
+                        "class_name": item["class_name"],
+                        "count": item["count"],
+                        "total_size": item["total_size"],
+                        "size_formatted": self._format_bytes(item["total_size"]),
+                    }
+                    for i, item in enumerate(top_by_size)
+                ],
             },
             summary=summary,
             findings=findings,
