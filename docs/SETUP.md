@@ -491,8 +491,8 @@ AZURE_EMBEDDINGS_API_KEY=your-openai-key
 
 1. ✅ Choose LLM provider and configure `.env`
 2. ✅ Run your first analysis
-3. 💰 Optional: Install Ollama for cost savings
-4. 🔍 Optional: Enable embeddings for better search
+3. 💰 Install Ollama for cost savings
+4. 🔍 Enable embeddings for better search
 5. 📚 Read [ARCHITECTURE.md](ARCHITECTURE.md) to understand how it works
 
 ## Support
