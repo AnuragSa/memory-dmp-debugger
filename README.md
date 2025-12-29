@@ -1,4 +1,4 @@
-# Memory Dump Debugger
+# Memory Dump Analyzer
 
 An AI-powered memory dump analyzer that uses hypothesis-driven investigation with LangGraph and WinDbg to automatically diagnose crashes, hangs, and memory issues.
 
