@@ -273,18 +273,26 @@ USER'S QUESTION: {question}
 
 {evidence_summary}
 
-TASK: Determine if we have enough information to answer the user's question.
+TASK: Determine if we have enough information to answer the user's question OBJECTIVELY based on evidence.
 
-Consider:
-1. Does the existing evidence directly address the question?
-2. Can we infer the answer from what we know?
-3. Or do we need to run new debugger commands to get more data?
+CRITICAL THINKING REQUIREMENTS:
+1. Check if existing evidence CONTRADICTS the user's claim or question premise
+2. If the user states something that conflicts with evidence (e.g., "CPU was 20%" but !runaway shows high CPU time), you MUST flag this as needing investigation
+3. Do NOT assume the user's statement is correct - validate it against actual data
+4. Look for objective measurements (CPU time, thread counts, memory sizes) that can prove or disprove claims
+5. If evidence conflicts with the user's assumption, set has_sufficient_evidence=false and suggest commands to clarify
+
+Analysis Steps:
+1. What does the existing evidence objectively show?
+2. Does the user's question contain an assumption or claim that needs validation?
+3. Does existing evidence support, contradict, or remain silent on the user's claim?
+4. If contradiction exists, we need MORE investigation to explain the discrepancy
 
 Respond in JSON format:
 {{
     "has_sufficient_evidence": true/false,
-    "reasoning": "Brief explanation of why we do or don't have enough information",
-    "suggested_commands": ["command1", "command2"] // Only if more investigation needed
+    "reasoning": "Brief explanation - mention any contradictions with user's assumptions",
+    "suggested_commands": ["command1", "command2"] // Only if more investigation needed or contradiction found
 }}
 
 CRITICAL - If suggesting commands:
@@ -621,19 +629,23 @@ USER'S QUESTION: {question}
 
 {evidence_text}
 
-TASK: Provide a clear, concise answer to the user's question based on the evidence above.
+TASK: Provide a clear, objective answer based ONLY on what the evidence shows.
 
-GUIDELINES:
-1. Be direct and specific - answer the question with the available evidence
-2. Reference specific commands/evidence when making claims (e.g., "According to !threads output...")
-3. DO NOT suggest manual debugger commands for the user to run - if evidence is insufficient, state what's missing
-4. DO NOT provide "Recommended Investigation Steps" - that's the system's job, not yours
-5. Use technical terms appropriately but explain complex concepts
-6. Format your answer in markdown
-7. Keep it concise (3-5 paragraphs max unless more detail is warranted)
-8. Focus on answering the question, not on what additional investigation could be done
+CRITICAL GUIDELINES - OBJECTIVE ANALYSIS:
+1. **Validate user assumptions against evidence** - If the user states something (e.g., "CPU was 20%") but evidence shows otherwise (e.g., !runaway shows hours of CPU time per thread), you MUST point out the contradiction
+2. **Be evidence-driven, not agreement-driven** - Do NOT try to make the user's claim fit the data if they conflict
+3. **Show the math** - When discussing metrics like CPU usage, thread counts, or memory sizes, calculate and show objective numbers from evidence
+4. **Acknowledge conflicts** - If evidence contradicts the user's statement, say: "However, the evidence shows..." or "This conflicts with..."
+5. **No speculation to fit user's narrative** - Base conclusions only on measurable data from commands
 
-Provide your answer now:"""
+Standard Guidelines:
+- Reference specific commands/evidence when making claims (e.g., "According to !runaway output...")
+- DO NOT suggest manual debugger commands for the user to run
+- Use technical terms appropriately but explain complex concepts
+- Format your answer in markdown
+- Keep it concise (3-5 paragraphs max unless more detail is warranted)
+
+Provide your objective, evidence-based answer now:"""
 
         messages = [
             SystemMessage(content="You are an expert Windows crash dump analyst helping a user understand their dump."),
@@ -671,6 +683,11 @@ Provide your answer now:"""
             if new_evidence:
                 evidence_text_full += "\n## New Investigation Results (FULL OUTPUTS)\n"
                 
+                # Track total size to avoid token explosion
+                total_evidence_chars = 0
+                MAX_TOTAL_EVIDENCE = 400000  # 400KB total limit (~100K tokens)
+                used_summaries = False  # Track if we had to use summaries
+                
                 for i, evidence in enumerate(new_evidence, 1):
                     evidence_text_full += f"\n{i}. `{evidence['command']}`\n"
                     
@@ -679,17 +696,46 @@ Provide your answer now:"""
                         if evidence.get('evidence_id'):
                             full_output = self.evidence_retriever.evidence_store.retrieve_evidence(evidence['evidence_id'])
                             if full_output:
-                                # Limit to 50KB to avoid token explosion
-                                output_to_send = full_output[:50000] if len(full_output) > 50000 else full_output
-                                evidence_text_full += f"   Full Output ({len(full_output)} chars):\n{output_to_send}\n"
-                                console.print(f"[dim cyan]  → Retrieved full external evidence ({len(full_output)} chars)[/dim cyan]")
+                                # Smart sizing: limit per-evidence and check total
+                                remaining_budget = MAX_TOTAL_EVIDENCE - total_evidence_chars
+                                max_this_evidence = min(50000, remaining_budget)  # Max 50KB per evidence or remaining budget
+                                
+                                if max_this_evidence <= 0:
+                                    console.print(f"[yellow]⚠ Evidence budget exhausted, using summaries for remaining items[/yellow]")
+                                    evidence_text_full += f"   Summary: {evidence.get('summary', 'No summary available')}\n"
+                                    used_summaries = True
+                                    continue
+                                
+                                output_to_send = full_output[:max_this_evidence] if len(full_output) > max_this_evidence else full_output
+                                evidence_text_full += f"   Full Output ({len(full_output)} chars, showing {len(output_to_send)}):\n{output_to_send}\n"
+                                total_evidence_chars += len(output_to_send)
+                                console.print(f"[dim cyan]  → Retrieved full external evidence ({len(full_output)} chars, used {len(output_to_send)})[/dim cyan]")
                             else:
                                 evidence_text_full += f"   Analysis: {evidence.get('summary', 'No summary available')}\n"
                         else:
                             evidence_text_full += f"   Analysis: {evidence.get('summary', 'No summary available')}\n"
                     else:
-                        # Inline evidence - include full output
-                        evidence_text_full += f"   Full Output:\n{evidence['output']}\n"
+                        # Inline evidence - include with budget check
+                        output = evidence['output']
+                        remaining_budget = MAX_TOTAL_EVIDENCE - total_evidence_chars
+                        max_this_evidence = min(len(output), remaining_budget)
+                        
+                        if max_this_evidence <= 0:
+                            console.print(f"[yellow]⚠ Evidence budget exhausted[/yellow]")
+                            used_summaries = True
+                            break
+                        
+                        output_to_send = output[:max_this_evidence]
+                        evidence_text_full += f"   Full Output:\n{output_to_send}\n"
+                        total_evidence_chars += len(output_to_send)
+                
+                console.print(f"[dim]Total evidence in retry: {total_evidence_chars} chars (~{total_evidence_chars // 4} tokens)[/dim]")
+            
+            # Prepend disclaimer if summaries were used
+            disclaimer = ""
+            if used_summaries:
+                disclaimer = "\n> ⚠️ **Note**: Due to model context window constraints (200K tokens), some command outputs were summarized rather than provided in full. The analysis below is based on available summaries and may have limited detail. For complete accuracy, consider investigating specific areas with targeted follow-up questions.\n\n"
+                console.print(f"[yellow]⚠ Adding disclaimer about summary-based analysis[/yellow]")
             
             # Retry with full outputs
             prompt_retry = f"""You are answering a user's question about a Windows memory dump analysis.
@@ -715,6 +761,15 @@ GUIDELINES:
 
 Provide your answer now:"""
             
+            # Safety check: estimate total prompt size
+            estimated_tokens = len(prompt_retry) // 4  # Rough estimate: 4 chars per token
+            if estimated_tokens > 180000:  # Leave 20K buffer from 200K limit
+                console.print(f"[yellow]⚠ Retry prompt too large ({estimated_tokens} estimated tokens), falling back to summary-based answer[/yellow]")
+                disclaimer = "\n> ⚠️ **Note**: Due to model context window constraints (200K tokens), this response is based on command summaries rather than full outputs. Results may lack detailed information. Consider asking more specific follow-up questions to get detailed analysis of particular areas.\n\n"
+                return disclaimer + answer  # Return original answer with disclaimer
+            
+            console.print(f"[dim]Retry prompt size: ~{estimated_tokens} tokens[/dim]")
+            
             messages_retry = [
                 SystemMessage(content="You are an expert Windows crash dump analyst helping a user understand their dump."),
                 HumanMessage(content=prompt_retry)
@@ -723,6 +778,10 @@ Provide your answer now:"""
             response_retry = self.llm.invoke(messages_retry)
             answer = response_retry.content.strip()
             console.print("[green]✓ Retrieved full data and re-formulated answer[/green]")
+            
+            # Prepend disclaimer if it exists
+            if disclaimer:
+                answer = disclaimer + answer
         
         return answer
     
