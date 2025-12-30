@@ -37,6 +37,8 @@ pip install uv
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
+**Important:** After installing uv, you must restart your terminal/VS Code for the PATH changes to take effect. If `uv` command is not found, close and reopen your terminal or VS Code.
+
 ### 3. Install Dependencies
 
 ```powershell
@@ -110,9 +112,16 @@ uv pip list
 
 **"uv: command not found"**
 ```powershell
+# If just installed, restart your terminal or VS Code first
+# Then try:
 pip install uv
 # Or reinstall: irm https://astral.sh/uv/install.ps1 | iex
 ```
+
+**After installation, still not found?**
+- Close all terminal windows and VS Code completely
+- Reopen VS Code and a new terminal
+- The PATH should now include uv
 
 **Clear cache**
 ```powershell
