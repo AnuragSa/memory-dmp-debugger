@@ -113,15 +113,18 @@ Think like an expert debugger - you know WHAT the problem is (hypothesis confirm
 STRICT COMMAND SELECTION RULES:
 1. If task explicitly mentions a command (e.g., "Use !do", "Run !clrstack"), use that EXACT command
 2. Do NOT substitute with different commands even if they seem more efficient
-3. If task says "!do on objects", first find objects with !dumpheap, then we'll run !do
-4. If task says "identify objects", use !dumpheap -type or !dumpheap -stat to enumerate
-5. Follow task intent: finding objects ≠ inspecting objects
+3. If task mentions "!do on objects" or "inspect/examine objects with !do":
+   - Use !dumpheap -type TypeName (WITHOUT -stat) to get actual object addresses
+   - DO NOT use -stat flag when addresses are needed for !do inspection
+   - We'll auto-generate !do commands for the addresses found
+4. Use !dumpheap -stat ONLY when task asks for statistics/counts/summaries, never for object inspection
+5. Follow task intent: finding objects for statistics ≠ finding objects for inspection
 
 CRITICAL COMMAND SYNTAX RULES:
 1. ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
 2. FORBIDDEN: pipes (|), foreach, findstr, grep, where-object, select-object, $_ variables
 3. Use WinDbg filtering: ~*e, .foreach, s -[d|a|u], !dumpheap -mt, etc.
-4. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -stat", "dx @$curthread"
+4. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -type Task", "dx @$curthread"
 5. INVALID examples: "!clrstack | findstr", "~*e !clrstack | where", "!do $addr | foreach"
 
 Return ONLY valid JSON in this exact format:
