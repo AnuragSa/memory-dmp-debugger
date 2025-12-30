@@ -38,8 +38,11 @@ class PlaceholderResolver:
     # Patterns to extract actual values from evidence
     EXTRACTION_PATTERNS = {
         'address': [
-            # Hex addresses like 0x00007ff8a1234567 or 000001f2a3b4c5d6 (8-16 hex digits)
-            re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
+            # Object addresses from dumpheap output: Address MT Size
+            # Pattern: 16-digit hex address at start of line, followed by MT and Size
+            re.compile(r'^(?:0x)?([0-9a-f]{12,16})\s+(?:0x)?[0-9a-f]{8,16}\s+\d+', re.IGNORECASE | re.MULTILINE),
+            # Generic hex addresses (fallback)
+            re.compile(r'\b(?:0x)?[0-9a-f]{12,16}\b', re.IGNORECASE),
         ],
         'mt': [
             # MethodTable from dumpheap -stat output: MT    Count TotalSize Class Name
@@ -50,12 +53,12 @@ class PlaceholderResolver:
             re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
         ],
         'object': [
+            # Object addresses from dumpheap: Address MT Size (at start of line)
+            re.compile(r'^(?:0x)?([0-9a-f]{12,16})\s+(?:0x)?[0-9a-f]{8,16}\s+\d+', re.IGNORECASE | re.MULTILINE),
             # Object addresses in various formats
-            re.compile(r'(?:Object|Address):\s*(?:0x)?([0-9a-f]{8,16})', re.IGNORECASE),
-            # Addresses in dumpheap output (one per line)
-            re.compile(r'^(?:0x)?([0-9a-f]{8,16})$', re.IGNORECASE | re.MULTILINE),
-            # Any hex address
-            re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
+            re.compile(r'(?:Object|Address):\s*(?:0x)?([0-9a-f]{12,16})', re.IGNORECASE),
+            # Any long hex address (12-16 digits to avoid picking up small numbers)
+            re.compile(r'\b(?:0x)?[0-9a-f]{12,16}\b', re.IGNORECASE),
         ],
         'thread': [
             # Thread IDs in various formats
@@ -206,15 +209,22 @@ class PlaceholderResolver:
         
         return []
     
-    def resolve_command(self, command: str) -> tuple[str, bool, str]:
+    def resolve_command(self, command: str, used_addresses: set[str] = None, invalid_addresses: set[str] = None) -> tuple[str, bool, str]:
         """Resolve all placeholders in a command.
         
         Args:
             command: Command with possible placeholders
+            used_addresses: Set of addresses already used (to avoid duplicates)
+            invalid_addresses: Set of addresses that returned errors (to skip)
             
         Returns:
             Tuple of (resolved_command, success, message)
         """
+        if used_addresses is None:
+            used_addresses = set()
+        if invalid_addresses is None:
+            invalid_addresses = set()
+        
         placeholders = self.detect_placeholders(command)
         
         if not placeholders:
@@ -231,13 +241,22 @@ class PlaceholderResolver:
             # Extract values of this type
             values = self.extract_values(placeholder_type, context_hint)
             
+            # Filter out used and invalid addresses
+            if placeholder_type in ('address', 'object', 'mt'):
+                filtered_values = []
+                for value in values:
+                    # Normalize for comparison
+                    norm_value = value if value.startswith('0x') else '0x' + value
+                    if norm_value not in used_addresses and norm_value not in invalid_addresses:
+                        filtered_values.append(value)
+                values = filtered_values
+            
             if not values:
-                unresolved.append(placeholder_text)
+                # If all values were filtered out, try to get more from evidence
+                unresolved.append(f"{placeholder_text} (all available addresses already used or invalid)")
                 continue
             
-            # Replace placeholder with first extracted value
-            # For commands that expect multiple values, we'll use the first one
-            # (Future enhancement: could generate multiple commands)
+            # Replace placeholder with first available unused value
             resolved_command = resolved_command.replace(placeholder_text, values[0])
         
         if unresolved:
@@ -275,13 +294,17 @@ def detect_placeholders(command: str) -> bool:
 
 def resolve_command_placeholders(
     command: str, 
-    previous_evidence: list[dict[str, Any]]
+    previous_evidence: list[dict[str, Any]],
+    used_addresses: set[str] = None,
+    invalid_addresses: set[str] = None
 ) -> tuple[str, bool, str]:
     """Convenience function to resolve placeholders in a command.
     
     Args:
         command: Command with possible placeholders
         previous_evidence: List of previous evidence to search for values
+        used_addresses: Set of addresses already used (to avoid duplicates)
+        invalid_addresses: Set of addresses that returned errors (to skip)
         
     Returns:
         Tuple of (resolved_command, success, message)
@@ -289,5 +312,10 @@ def resolve_command_placeholders(
     if not detect_placeholders(command):
         return command, True, "No placeholders found"
     
+    if used_addresses is None:
+        used_addresses = set()
+    if invalid_addresses is None:
+        invalid_addresses = set()
+    
     resolver = PlaceholderResolver(previous_evidence)
-    return resolver.resolve_command(command)
+    return resolver.resolve_command(command, used_addresses, invalid_addresses)

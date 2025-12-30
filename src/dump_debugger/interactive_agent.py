@@ -665,6 +665,9 @@ Provide your objective, evidence-based answer now:"""
         if any(indicator in answer.lower() for indicator in truncation_indicators):
             console.print("[yellow]⚠ LLM detected missing/truncated data, retrieving full outputs...[/yellow]")
             
+            # Track if we had to use summaries (initialize early to avoid UnboundLocalError)
+            used_summaries = False
+            
             # Rebuild evidence_text with full outputs (no truncation)
             evidence_text_full = "## Key Conclusions\n"
             if context.get('conclusions'):
@@ -686,7 +689,6 @@ Provide your objective, evidence-based answer now:"""
                 # Track total size to avoid token explosion
                 total_evidence_chars = 0
                 MAX_TOTAL_EVIDENCE = 400000  # 400KB total limit (~100K tokens)
-                used_summaries = False  # Track if we had to use summaries
                 
                 for i, evidence in enumerate(new_evidence, 1):
                     evidence_text_full += f"\n{i}. `{evidence['command']}`\n"

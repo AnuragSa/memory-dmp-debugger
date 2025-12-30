@@ -196,6 +196,9 @@ Return ONLY valid JSON in this exact format:
         
         # Track outputs for placeholder resolution
         previous_outputs = []
+        # Track which addresses have been used and which are invalid
+        used_addresses = set()
+        invalid_addresses = set()
         
         for i, command in enumerate(commands_to_execute):
             # Detect any placeholder pattern <...>
@@ -214,10 +217,24 @@ Return ONLY valid JSON in this exact format:
             # Check for placeholders and try to resolve them
             if detect_placeholders(command):
                 console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {command}")
-                resolved_command, success, message = resolve_command_placeholders(command, evidence_for_resolution)
+                
+                # Try to resolve, cycling through available addresses and skipping used/invalid ones
+                resolved_command, success, message = resolve_command_placeholders(
+                    command, 
+                    evidence_for_resolution,
+                    used_addresses=used_addresses,
+                    invalid_addresses=invalid_addresses
+                )
                 
                 if success:
                     console.print(f"  [green]✓ Resolved to:[/green] {resolved_command}")
+                    # Track which address was used
+                    addr_match = re.search(r'(?:0x)?[0-9a-f]{8,16}', resolved_command, re.IGNORECASE)
+                    if addr_match:
+                        used_addr = addr_match.group(0)
+                        if not used_addr.startswith('0x'):
+                            used_addr = '0x' + used_addr
+                        used_addresses.add(used_addr)
                     command = resolved_command
                 else:
                     console.print(f"  [red]✗ {message}[/red]")
@@ -263,6 +280,17 @@ Return ONLY valid JSON in this exact format:
                     # No analysis - show raw output preview
                     preview = output_str[:200] if len(output_str) > 200 else output_str
                     console.print(f"[dim cyan]  Result: {preview}[/dim cyan]")
+            
+            # Track invalid addresses (objects not found)
+            if 'not found' in output_str.lower() or 'invalid' in output_str.lower():
+                # Extract the address from the command (e.g., !do 0x123456)
+                addr_match = re.search(r'(?:0x)?[0-9a-f]{8,16}', command, re.IGNORECASE)
+                if addr_match:
+                    invalid_addr = addr_match.group(0)
+                    if not invalid_addr.startswith('0x'):
+                        invalid_addr = '0x' + invalid_addr
+                    invalid_addresses.add(invalid_addr)
+                    console.print(f"  [dim red]→ Marking {invalid_addr} as invalid[/dim red]")
             
             # Create evidence entry
             # For external evidence, output_str is already the summary (set by execute_command_with_analysis)
