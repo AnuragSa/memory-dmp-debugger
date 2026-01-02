@@ -6,6 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+
+console = Console()
+
 
 class EvidenceStore:
     """External storage for large debugger outputs with embeddings."""
@@ -255,7 +259,25 @@ class EvidenceStore:
             evidence_id: Parent evidence ID
             chunks: List of (chunk_num, chunk_text, analysis_dict) tuples
         """
+        # SQLite has INT_MAX limit (~2GB) for strings
+        # Calculate total size and warn if too large
+        MAX_CHUNK_SIZE = 100 * 1024 * 1024  # 100MB per chunk
+        MAX_TOTAL_SIZE = 1024 * 1024 * 1024  # 1GB total (safe margin under 2GB limit)
+        
+        total_size = sum(len(chunk_text) for _, chunk_text, _ in chunks)
+        
+        if total_size > MAX_TOTAL_SIZE:
+            console.print(f"[yellow]⚠ Chunks total {total_size:,} bytes (>{MAX_TOTAL_SIZE:,}), skipping chunk storage[/yellow]")
+            console.print(f"[dim]  This prevents SQLite overflow errors. Analysis summary is still available.[/dim]")
+            return
+        
         for chunk_num, chunk_text, analysis in chunks:
+            # Validate individual chunk size
+            chunk_size = len(chunk_text)
+            if chunk_size > MAX_CHUNK_SIZE:
+                console.print(f"[yellow]⚠ Chunk {chunk_num} is {chunk_size:,} bytes (>{MAX_CHUNK_SIZE:,}), truncating[/yellow]")
+                chunk_text = chunk_text[:MAX_CHUNK_SIZE] + "\n... [TRUNCATED]"
+            
             self.conn.execute("""
                 INSERT INTO chunks (evidence_id, chunk_num, chunk_text, analysis)
                 VALUES (?, ?, ?, ?)

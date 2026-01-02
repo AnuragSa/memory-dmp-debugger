@@ -126,6 +126,13 @@ CRITICAL COMMAND SYNTAX RULES:
 3. Use WinDbg filtering: ~*e, .foreach, s -[d|a|u], !dumpheap -mt, etc.
 4. VALID examples: "!clrstack", "~*e !clrstack", "!dumpheap -type Task", "dx @$curthread"
 5. INVALID examples: "!clrstack | findstr", "~*e !clrstack | where", "!do $addr | foreach"
+6. DUMPHEAP SYNTAX:
+   - ✓ !dumpheap -type ClassName (finds objects by type name)
+   - ✓ !dumpheap -type ClassName -short (abbreviated output)
+   - ✓ !dumpheap -mt 0x00007fff12345678 (finds objects by method table ADDRESS)
+   - ✓ !dumpheap -mt 0x00007fff12345678 -short (method table + abbreviated)
+   - ✗ !dumpheap -mt ClassName (INVALID - -mt requires hex address, not name)
+   - ✗ !dumpheap -mt -short ClassName (INVALID - -mt needs address before other flags)
 
 Return ONLY valid JSON in this exact format:
 {{
