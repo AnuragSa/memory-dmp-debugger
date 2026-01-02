@@ -257,7 +257,18 @@ class PlaceholderResolver:
                 continue
             
             # Replace placeholder with first available unused value
-            resolved_command = resolved_command.replace(placeholder_text, values[0])
+            value_to_insert = values[0]
+            
+            # Avoid double 0x prefix: if command has "0x<placeholder>" and value starts with "0x", strip it
+            if placeholder_text.startswith('<') and placeholder_text.endswith('>'):
+                # Check if there's "0x" immediately before the placeholder
+                placeholder_pos = resolved_command.find(placeholder_text)
+                if placeholder_pos > 1 and resolved_command[placeholder_pos-2:placeholder_pos] == '0x':
+                    # Command has "0x<placeholder>", strip 0x from value if present
+                    if value_to_insert.startswith('0x'):
+                        value_to_insert = value_to_insert[2:]
+            
+            resolved_command = resolved_command.replace(placeholder_text, value_to_insert)
         
         if unresolved:
             return resolved_command, False, f"Could not resolve: {', '.join(unresolved)}"
