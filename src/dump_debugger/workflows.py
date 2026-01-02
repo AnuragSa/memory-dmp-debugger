@@ -268,6 +268,24 @@ Return ONLY valid JSON in this exact format:
                 evidence_id = None
                 analysis = None
             
+            # Post-process: Filter finalizequeue output if task mentions specific type
+            if '!finalizequeue' in command.lower() and evidence_type == 'inline':
+                # Check if task mentions a specific type to filter for
+                type_match = re.search(r'(?:filter|filtered for|looking for|find|identify)\s+(\w+(?:\.\w+)*)', task.lower())
+                if type_match:
+                    filter_type = type_match.group(1)
+                    # Filter output to only lines containing the type
+                    filtered_lines = []
+                    for line in output_str.split('\n'):
+                        if filter_type.lower() in line.lower():
+                            filtered_lines.append(line)
+                    
+                    if filtered_lines:
+                        original_count = len(output_str.split('\n'))
+                        filtered_output = '\n'.join(filtered_lines)
+                        output_str = filtered_output
+                        console.print(f"[dim]  → Filtered {original_count} lines to {len(filtered_lines)} lines containing '{filter_type}'[/dim]")
+            
             # Display results with same visibility as hypothesis testing phase
             if state.get('show_command_output') and output_str:
                 # Show summary if available (analyzer output)
@@ -328,23 +346,46 @@ Return ONLY valid JSON in this exact format:
                 # For inline evidence, use the output directly
                 previous_outputs.append(output_str)
             
-            # Auto-generate follow-up !do commands if task mentions "!do" but we only found objects
-            if ('!do' in task.lower() or '!dumpobj' in task.lower()) and '!dumpheap' in command.lower() and i == len(commands_to_execute) - 1:
-                # Task wants !do inspection but we only ran !dumpheap
+            # Auto-generate follow-up inspection commands if task mentions them but we only found objects
+            # Check for !do, !gcroot, !objsize, etc. - commands that need addresses from !dumpheap
+            inspection_commands = {
+                '!do': '!do',
+                '!dumpobj': '!do',
+                '!gcroot': '!gcroot',
+                '!objsize': '!objsize',
+                '!gchandles': '!gchandles'
+            }
+            
+            # Check if task wants any inspection command and we just ran !dumpheap
+            inspection_cmd = None
+            for keyword, cmd in inspection_commands.items():
+                if keyword in task.lower():
+                    inspection_cmd = cmd
+                    break
+            
+            if inspection_cmd and '!dumpheap' in command.lower() and i == len(commands_to_execute) - 1:
+                # Task wants inspection but we only ran !dumpheap
                 # Extract object addresses from output
                 import re
                 addr_pattern = r'^([0-9a-f]{12,16})\s+[0-9a-f]{12,16}\s+\d+'
                 addr_matches = re.findall(addr_pattern, output_str.lower(), re.MULTILINE)
                 
                 if addr_matches:
-                    # Limit to reasonable number (5-7 objects)
-                    max_objects = 7
-                    num_to_inspect = min(len(addr_matches), max_objects)
-                    console.print(f"[cyan]  → Task requested !do inspection, auto-generating {num_to_inspect} !do commands[/cyan]")
+                    # Determine number of objects based on task wording
+                    max_objects = 7  # Default
+                    if 'top 5' in task.lower() or '5-10' in task.lower():
+                        max_objects = 5
+                    elif 'top 10' in task.lower() or '10-15' in task.lower():
+                        max_objects = 10
+                    elif 'several' in task.lower() or 'few' in task.lower():
+                        max_objects = 3
                     
-                    # Add !do commands to execution queue
+                    num_to_inspect = min(len(addr_matches), max_objects)
+                    console.print(f"[cyan]  → Task requested {inspection_cmd} inspection, auto-generating {num_to_inspect} commands[/cyan]")
+                    
+                    # Add inspection commands to execution queue
                     for addr in addr_matches[:num_to_inspect]:
-                        commands_to_execute.append(f"!do {addr}")
+                        commands_to_execute.append(f"{inspection_cmd} {addr}")
             
             # Limit commands_executed to prevent bloat
             if len(all_commands) > 30:
