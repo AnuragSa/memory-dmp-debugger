@@ -197,5 +197,14 @@ class Settings(BaseSettings):
         return path
 
 
-# Global settings instance
-settings = Settings()
+# Global settings instance (lazy initialization to avoid env var issues during debug)
+_settings = None
+
+def get_settings() -> Settings:
+    """Get or create settings instance."""
+    global _settings
+    if _settings is None:
+        _settings = Settings()
+    return _settings
+
+settings = get_settings()

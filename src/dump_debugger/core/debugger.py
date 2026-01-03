@@ -436,6 +436,30 @@ class DebuggerWrapper:
                     "success": False,
                     "error": error_msg,
                 }
+            
+            # Validate ONLY the specific problematic pattern: !dumpheap -mt followed by non-hex value
+            # This is very surgical - only catches the exact issue we've seen
+            if command_stripped.lower().startswith('!dumpheap') and '-mt ' in command_stripped.lower():
+                # Extract what comes after -mt
+                mt_pattern = re.search(r'-mt\s+(\S+)', command_stripped, re.IGNORECASE)
+                if mt_pattern:
+                    mt_arg = mt_pattern.group(1)
+                    # If -mt arg is NOT a hex address (e.g., it's -short, or a class name)
+                    # Note: Valid hex can be 0x1234abcd or just 1234abcd
+                    if not re.match(r'^(?:0x)?[0-9a-f]{8,16}$', mt_arg, re.IGNORECASE):
+                        # This is the problematic pattern
+                        error_msg = (
+                            f"Invalid !dumpheap syntax: '-mt {mt_arg}' requires a hex method table address. "
+                            f"Did you mean '!dumpheap -type {mt_arg}'?"
+                        )
+                        console.print(f"[red]✗[/red] {error_msg}")
+                        return {
+                            "command": command,
+                            "output": "",
+                            "parsed": None,
+                            "success": False,
+                            "error": error_msg,
+                        }
 
             if self.show_output:
                 console.print(f"[dim]Executing: {command_stripped}[/dim]")
