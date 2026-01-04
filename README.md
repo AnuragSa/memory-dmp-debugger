@@ -30,7 +30,25 @@ The debugger works like an expert engineer would:
    - If REJECTED → Form alternative hypothesis
    - If INCONCLUSIVE → Gather more targeted evidence (max 2 attempts)
 5. **Investigate**: Execute focused tasks to pinpoint the exact issue
-6. **Report**: Generate actionable findings with evidence
+6. **Reason**: Synthesize all evidence into coherent conclusions
+7. **Review**: Critic agent reviews analysis for gaps, errors, contradictions (2 rounds)
+8. **Refine**: If issues found, collect missing evidence and produce corrected analysis
+9. **Report**: Generate actionable findings with suggested follow-up questions if needed
+
+## Quality Assurance
+
+Before presenting findings, a **CriticAgent** reviews the analysis for:
+
+- **Architectural errors** (claims that violate how technologies actually work)
+- **Evidence gaps** (conclusions without supporting data)
+- **Logical contradictions** (conflicting statements)
+- **Alternative explanations** (obvious alternatives not considered)
+
+If issues are found:
+1. **Round 1**: System collects missing evidence and re-analyzes with critique feedback
+2. **Round 2**: Final verification - if issues remain, generates **follow-up questions** for user
+
+This self-review catches errors before presenting to you, improving output quality.
 
 ## Why Hypothesis-Driven?
 
@@ -40,13 +58,24 @@ Traditional debuggers execute a fixed plan. This debugger **thinks**:
 - **Tests quickly** with 2-3 commands before committing to deep investigation
 - **Pivots when wrong** instead of continuing down the wrong path
 - **Applies expert knowledge** like thread count thresholds and common failure patterns
+- **Self-reviews** through critic agent to catch errors before output
 - **Builds evidence chains** showing how it reached conclusions
 
-This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, and adapt.
+This mirrors how expert debuggers actually work—they don't blindly run commands; they form theories, test them, adapt, and validate their conclusions.
 
 ## Interactive Mode
 
 After automated analysis completes, you can ask follow-up questions about the dump. The agent uses existing evidence when possible and executes new debugger commands only when needed.
+
+**Suggested Questions**: If the quality review finds unresolved issues, the system generates specific follow-up questions you can ask to explore further:
+
+```
+🔍 Suggested Follow-Up Questions
+
+1. Can you execute !threadpool to confirm thread pool statistics?
+2. What evidence links the SQL timeouts to the compiler lock contention?
+3. Could this be happening at runtime rather than initialization?
+```
 
 ### Quick Start
 

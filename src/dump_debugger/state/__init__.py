@@ -86,6 +86,11 @@ class AnalysisState(TypedDict):
     conclusions: list[str]  # Key conclusions drawn
     confidence_level: Literal["high", "medium", "low"] | None
     
+    # Critique phase (NEW - quality review)
+    critique_round: int  # Current critique iteration (0-based)
+    critique_result: dict[str, Any]  # Critic's findings {issues_found, critical_issues, suggested_actions, severity}
+    has_unresolved_issues: bool  # Whether issues remain after max rounds
+    
     # Final output
     final_report: str | None
     
