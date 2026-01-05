@@ -116,6 +116,23 @@ COMMAND GUIDELINES:
 - Use commands appropriate for {dump_type}-mode dumps
 - Be specific with commands - use actual command syntax
 
+CRITICAL THREAD ID CLARIFICATION:
+There are THREE different thread identifiers in .NET debugging:
+1. MANAGED THREAD ID: Shown in !threads "ID" column and !syncblk "Owning Thread" column (e.g., 12, 19, 42)
+2. DEBUGGER THREAD NUMBER: Shown in !threads "DBG" column (e.g., 0, 1, 2, ...)  
+3. OS THREAD ID (OSID): Shown in !threads "OSID" column as hex (e.g., 0x3fc, 0x23c4)
+
+When referring to threads in your hypothesis:
+- Use "managed thread ID 12" or "managed thread 12" when referencing the !threads ID column
+- Use "debugger thread 9" when referencing the !threads DBG column
+- Use "OSID 0x3fc" when referencing the operating system thread ID
+- BE PRECISE - do not say "thread 0x3fc" which mixes terminology incorrectly
+
+Thread command test syntax:
+- For debugger thread 9: ~9e !clrstack (execute without switching)
+- For OSID 0x3fc: ~~[3fc]e !clrstack (bracket has NO 0x prefix)
+- For all threads: ~*e !clrstack
+
 CRITICAL - COMMAND SYNTAX RULES:
 - Generate ONLY pure WinDbg commands - NEVER use PowerShell syntax
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_

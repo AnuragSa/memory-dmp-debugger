@@ -51,7 +51,7 @@ class SyncBlockAnalyzer(BaseAnalyzer):
                 findings.append("⚠️ Lock contention detected - potential deadlock or blocking")
                 for sb in contention[:3]:  # Show top 3
                     findings.append(
-                        f"  Thread {sb.get('holding_thread')} holding lock, "
+                        f"  Managed thread ID {sb.get('holding_thread')} holding lock, "
                         f"{sb.get('waiting_threads')} threads waiting"
                     )
             else:
@@ -84,12 +84,20 @@ class SyncBlockAnalyzer(BaseAnalyzer):
             )
     
     def _parse_sync_blocks(self, output: str) -> List[Dict[str, Any]]:
-        """Parse sync block entries."""
+        """Parse sync block entries.
+        
+        IMPORTANT: The "Owning Thread" column in !syncblk output shows the MANAGED THREAD ID,
+        not the debugger thread number or OSID. To investigate a thread:
+        1. Note the managed ID from !syncblk (e.g., 12)
+        2. Look up !threads output to find the corresponding debugger thread number or OSID
+        3. Use ~<DBG#>s or ~~[<OSID>]s to switch to that thread
+        """
         blocks = []
         lines = output.split('\n')
         
         # Pattern: Index SyncBlock MonitorHeld Recursion Owning Thread Info
         # Example: 1    00000001  0000002e  1         12 Thread 0x1234
+        # NOTE: Group 5 captures the MANAGED THREAD ID (not debugger thread or OSID)
         pattern = re.compile(
             r'^\s*(\d+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)\s+(\d+)'
         )
@@ -102,7 +110,7 @@ class SyncBlockAnalyzer(BaseAnalyzer):
                     "syncblock": match.group(2),
                     "monitor_held": match.group(3),
                     "recursion": int(match.group(4)),
-                    "holding_thread": int(match.group(5)),
+                    "holding_thread": int(match.group(5)),  # This is MANAGED THREAD ID
                     "waiting_threads": 0,  # Would need additional parsing
                 })
         
