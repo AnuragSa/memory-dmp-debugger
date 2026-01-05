@@ -104,19 +104,9 @@ The interactive agent follows a 3-step process for each question:
 
 ### Session Management
 
-- **Timeout**: Sessions automatically timeout after 30 minutes (configurable)
-- **Message Limit**: Chat history limited to 50 messages (configurable)
+- **Timeout**: Sessions automatically timeout after 30 minutes
+- **Message Limit**: Chat history limited to 50 messages
 - **Graceful Exit**: Press Ctrl+C or Ctrl+D to exit anytime
-
-### Configuration
-
-Add these settings to your `.env` file:
-
-```env
-# Interactive chat mode settings
-MAX_CHAT_MESSAGES=50                    # Maximum messages in chat history
-CHAT_SESSION_TIMEOUT_MINUTES=30         # Session timeout in minutes
-```
 
 ### Example Session
 
@@ -493,18 +483,38 @@ Tip: you can write reports to a file via `--output <path>`.
 
 ```
 src/dump_debugger/
-├── hypothesis_agent.py    # Hypothesis formation, testing, and evaluation
-├── expert_knowledge.py    # Known patterns, heuristics, and command shortcuts
-├── core/
-│   └── debugger.py       # WinDbg/CDB wrapper and command execution
-├── state/
-│   └── __init__.py       # LangGraph state definitions
-├── prompts/
-│   └── __init__.py       # LLM prompts for agents
-├── workflows.py          # Expert workflow orchestration
-├── cli.py               # CLI entry point
-├── config.py            # Configuration management
-└── llm.py               # LLM provider abstraction
+├── agents/                # AI agents for different analysis tasks
+│   ├── critic.py         # Reviews analysis for errors/gaps
+│   ├── hypothesis.py     # Forms and tests hypotheses
+│   ├── investigator.py   # Executes investigation plans
+│   ├── reasoner.py       # Synthesizes evidence into conclusions
+│   ├── report_writer.py  # Generates final reports
+│   └── interactive_chat.py  # Handles follow-up questions
+├── analyzers/            # Specialized debugger output parsers
+│   ├── clrstack.py       # Call stack analysis
+│   ├── threads.py        # Thread state analysis
+│   ├── syncblk.py        # Lock contention analysis
+│   └── ...               # Other specialized analyzers
+├── core/                 # Core debugger integration
+│   └── debugger.py       # WinDbg/CDB wrapper
+├── evidence/             # Evidence management system
+│   ├── analyzer.py       # Analyzes large outputs in chunks
+│   ├── retrieval.py      # Semantic/keyword search
+│   └── storage.py        # SQLite storage for evidence
+├── state/                # LangGraph state definitions
+│   └── __init__.py       # AnalysisState and related models
+├── prompts/              # LLM prompts for agents
+│   └── __init__.py       # Prompt templates
+├── session/              # Session management
+│   └── __init__.py       # Session creation and cleanup
+├── workflows.py          # LangGraph workflow orchestration
+├── cli.py                # CLI entry point
+├── config.py             # Configuration management
+├── llm.py                # LLM provider abstraction
+├── llm_router.py         # Cloud/local LLM routing
+├── token_tracker.py      # Token usage tracking
+├── expert_knowledge.py   # Pattern recognition and heuristics
+└── analyzer_stats.py     # Usage statistics tracking
 ```
 
 ## Development
