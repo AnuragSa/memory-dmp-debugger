@@ -102,6 +102,32 @@ Previous Evidence: {len(prev_evidence)} items
 Think like an expert debugger - you know WHAT the problem is (hypothesis confirmed), now find WHERE and WHY.
 {"PREFER 'dx' commands with filters (.Select, .Where, .Take) for concise output." if supports_dx else "Use traditional WinDbg/SOS commands."}
 
+CRITICAL THREAD ID CLARIFICATION:
+There are THREE different thread identifiers in .NET debugging:
+1. MANAGED THREAD ID: Shown in !threads "ID" column and !syncblk "Owning Thread" column (e.g., 12, 19, 42)
+2. DEBUGGER THREAD NUMBER: Shown in !threads "DBG" column (e.g., 0, 1, 2, ...)
+3. OS THREAD ID (OSID): Shown in !threads "OSID" column as hex (e.g., 0x3fc, 0x23c4)
+
+Thread Command Syntax:
+- Switch by debugger thread: ~<num>s (e.g., ~9s switches to debugger thread 9)
+- Execute on debugger thread: ~<num>e <command> (e.g., ~9e !clrstack runs on thread 9 without switching)
+- Switch by OSID: ~~[osid]s (e.g., ~~[3fc]s switches to OSID 0x3fc)
+- Execute on OSID: ~~[osid]e <command> (e.g., ~~[3fc]e !clrstack runs on OSID 0x3fc)
+- Execute on all threads: ~*e <command> (e.g., ~*e !clrstack)
+
+CRITICAL SYNTAX RULES:
+- OSID in brackets: DO NOT include "0x" prefix (use ~~[3fc]s NOT ~~[0x3fc]s)
+- When referencing OSID in text: DO include "0x" prefix ("OSID 0x3fc" for clarity)
+- Prefer 'e' (execute) over 's' (switch) when examining specific thread without changing context
+
+IMPORTANT: When !syncblk shows "thread 12" as lock holder, this is the MANAGED THREAD ID.
+To investigate this thread:
+1. First get !threads output to see the DBG or OSID column for managed ID 12
+2. Then use ~<DBG#>e or ~~[<OSID>]e to execute command on that thread
+Example: If !threads shows "DBG=9, ID=12, OSID=3fc", managed thread 12 is at:
+- Debugger thread 9: Use ~9e !clrstack (no 0x prefix needed)
+- OSID 0x3fc: Use ~~[3fc]e !clrstack (bracket gets NO 0x prefix, but we refer to it as "OSID 0x3fc")
+
 STRICT COMMAND SELECTION RULES:
 1. If task explicitly mentions a command (e.g., "Use !do", "Run !clrstack"), use that EXACT command
 2. Do NOT substitute with different commands even if they seem more efficient

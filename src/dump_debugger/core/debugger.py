@@ -469,10 +469,13 @@ class DebuggerWrapper:
             
             # Check if command contains thread switch - WinDbg supports multiple syntaxes:
             # ~<number>s        - switch by thread index (e.g., ~19s)
-            # ~~[<tid>]s        - switch by OS thread ID (e.g., ~~[3fc]s or ~~[0x3fc]s)
+            # ~~[<tid>]s        - switch by OS thread ID (e.g., ~~[3fc]s - note: no 0x prefix in brackets)
+            # ~<number>e <cmd>  - execute command on thread index (e.g., ~19e !clrstack)
+            # ~~[<tid>]e <cmd>  - execute command on OSID (e.g., ~~[3fc]e !clrstack)
             # ~~s               - switch to last event thread
-            # ~*s               - all threads switch
+            # ~*e <cmd>         - execute command on all threads (e.g., ~*e !clrstack)
             # Pattern: Match thread switch followed optionally by semicolon and command
+            # NOTE: Code tolerates 0x prefix in brackets (~~[0x3fc]) but proper syntax is ~~[3fc]
             thread_switch_match = re.match(r'^(~+(?:\d+|\[(?:0x)?[0-9a-fA-F]+\]|\*)?s);?\s*(.*)$', command_stripped)
             
             if thread_switch_match:
