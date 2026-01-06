@@ -1,6 +1,6 @@
 # Architecture Guide
 
-This document consolidates the project's architecture notes: the hypothesis-driven workflow, evidence management, specialized analyzers, quality review system, and interactive mode.
+This document dhows the project's architecture: the hypothesis-driven workflow, evidence management, specialized analyzers, quality review system, and interactive mode.
 
 ## High-Level Flow
 
