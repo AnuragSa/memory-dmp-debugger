@@ -4,21 +4,207 @@ Complete guide for setting up and configuring the Memory Dump Debugger with vari
 
 ## Table of Contents
 
-1. [Quick Start](#quick-start)
-2. [Package Manager (uv)](#package-manager-uv)
-3. [LLM Provider Setup](#llm-provider-setup)
+1. [Prerequisites](#prerequisites)
+   - [Python Installation](#python-installation)
+   - [Verifying Installation](#verifying-installation)
+2. [Quick Start](#quick-start)
+3. [Package Manager (uv)](#package-manager-uv)
+4. [LLM Provider Setup](#llm-provider-setup)
    - [Azure AI Foundry (Claude)](#azure-ai-foundry-claude)
    - [Azure OpenAI](#azure-openai)
    - [OpenAI](#openai)
    - [Anthropic](#anthropic)
    - [Ollama (Local)](#ollama-local)
-4. [Tiered LLM Strategy](#tiered-llm-strategy)
-5. [Embeddings for Semantic Search](#embeddings-for-semantic-search)
-6. [WinDbg Configuration](#windbg-configuration)
+5. [Tiered LLM Strategy](#tiered-llm-strategy)
+6. [Embeddings for Semantic Search](#embeddings-for-semantic-search)
+7. [WinDbg Configuration](#windbg-configuration)
+
+---
+
+## Prerequisites
+
+### Python Installation
+
+This project requires **Python 3.11 or higher**. Follow these steps to install Python correctly with proper PATH configuration.
+
+#### Option 1: Install from python.org (Recommended)
+
+1. **Download Python**
+   - Visit https://www.python.org/downloads/
+   - Download Python 3.11 or later (e.g., Python 3.12.x)
+
+2. **Run Installer**
+   - ⚠️ **CRITICAL**: Check "Add Python to PATH" at the bottom of the first screen
+   - Check "Add Python to environment variables"
+   - Click "Install Now" (recommended) or "Customize installation"
+
+3. **Verify PATH Addition**
+   - The installer adds these to your PATH:
+     - `C:\Users\YourName\AppData\Local\Programs\Python\Python312\`
+     - `C:\Users\YourName\AppData\Local\Programs\Python\Python312\Scripts\`
+
+#### Option 2: Install using winget (Windows 11/10)
+
+```powershell
+# Install Python 3.12
+winget install Python.Python.3.12
+
+# Restart terminal after installation
+```
+
+#### Option 3: Install using Chocolatey
+
+```powershell
+# Install Chocolatey (if not already installed)
+Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# Install Python
+choco install python --version=3.12.0 -y
+
+# Restart terminal after installation
+```
+
+### Verifying Installation
+
+After installing Python, **you must restart your terminal or VS Code** for PATH changes to take effect.
+
+#### Test Python Installation
+
+Open a **new** PowerShell terminal and run:
+
+```powershell
+# Check Python version
+python --version
+# Expected output: Python 3.11.x or Python 3.12.x
+
+# Check pip version
+pip --version
+# Expected output: pip 24.x.x from C:\Users\...\Python312\...
+
+# Check Python path
+where.exe python
+# Expected output: C:\Users\YourName\AppData\Local\Programs\Python\Python312\python.exe
+```
+
+### Troubleshooting PATH Issues
+
+#### Problem: "python: command not found" or "pip: command not found"
+
+**Solution 1: Restart Terminal/VS Code**
+- Close **all** terminal windows
+- Close VS Code completely
+- Reopen VS Code and create a new terminal
+- Try commands again
+
+**Solution 2: Manual PATH Configuration**
+
+If Python still isn't found, add it to PATH manually:
+
+1. **Find Python Installation Path**
+   ```powershell
+   # Search for python.exe
+   Get-ChildItem -Path C:\Users\$env:USERNAME\AppData\Local\Programs\Python -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 1 FullName
+   
+   # Or search in Program Files
+   Get-ChildItem -Path "C:\Program Files\Python*" -Recurse -Filter python.exe -ErrorAction SilentlyContinue | Select-Object -First 1 FullName
+   ```
+
+2. **Add to PATH (User Environment Variable)**
+   ```powershell
+   # Replace with your actual Python path
+   $pythonPath = "C:\Users\YourName\AppData\Local\Programs\Python\Python312"
+   $scriptsPath = "$pythonPath\Scripts"
+   
+   # Get current PATH
+   $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+   
+   # Add Python paths if not already present
+   if ($currentPath -notlike "*$pythonPath*") {
+       $newPath = "$pythonPath;$scriptsPath;$currentPath"
+       [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+       Write-Host "Python added to PATH. Please restart your terminal."
+   }
+   ```
+
+3. **Restart Terminal** - PATH changes only take effect in new terminals
+
+**Solution 3: Use py Launcher (Windows)**
+
+Windows includes a Python launcher that works even when PATH isn't set:
+
+```powershell
+# Check Python version
+py --version
+
+# Use pip through py launcher
+py -m pip --version
+
+# Install uv using py launcher
+py -m pip install uv
+
+# Run the tool
+py -m pip install -e .
+```
+
+#### Problem: Multiple Python Versions Installed
+
+If you have multiple Python versions and the wrong one is being used:
+
+```powershell
+# List all Python installations
+where.exe python
+
+# Check which Python is first in PATH
+python --version
+
+# Use specific version with py launcher
+py -3.12 --version        # Use Python 3.12
+py -3.11 --version        # Use Python 3.11
+py -m pip install uv      # Install to default Python
+```
+
+#### Problem: "Access Denied" or Permission Errors
+
+Run PowerShell as Administrator:
+
+```powershell
+# Right-click PowerShell → "Run as Administrator"
+# Then install Python or add to PATH
+```
+
+Or install for current user only:
+
+```powershell
+pip install --user uv
+```
+
+#### Problem: pip is outdated
+
+```powershell
+# Upgrade pip
+python -m pip install --upgrade pip
+
+# Or using py launcher
+py -m pip install --upgrade pip
+```
+
+### Execution Policy (Windows)
+
+If you get "script execution disabled" errors:
+
+```powershell
+# Allow scripts for current user
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# Verify
+Get-ExecutionPolicy -List
+```
 
 ---
 
 ## Quick Start
+
+**Before starting, ensure Python 3.11+ is installed. See [Prerequisites](#prerequisites) above.**
 
 ### 1. Navigate to Project Root
 
@@ -27,26 +213,49 @@ Complete guide for setting up and configuring the Memory Dump Debugger with vari
 cd C:\path\to\memory-dmp-debugger  # Adjust path to your location
 ```
 
-### 2. Install uv (Package Manager)
+### 2. Verify Python Installation
 
 ```powershell
-# Install uv
+# Verify Python is accessible
+python --version  # Should show Python 3.11.x or higher
+pip --version     # Should show pip version
+
+# If commands not found, see Prerequisites section above
+```
+
+### 3. Install uv (Package Manager)
+
+```powershell
+# Install uv using pip
 pip install uv
 
-# Or use the installer (recommended)
+# Or use the official installer (recommended)
 irm https://astral.sh/uv/install.ps1 | iex
 ```
 
-**Important:** After installing uv, you must restart your terminal/VS Code for the PATH changes to take effect. If `uv` command is not found, close and reopen your terminal or VS Code.
+**Important:** After installing uv, you must **restart your terminal or VS Code** for the PATH changes to take effect. If `uv` command is not found, close and reopen your terminal.
 
-### 3. Install Dependencies
+**Troubleshooting:**
+```powershell
+# If uv not found after restart, check if it's in PATH
+where.exe uv
+
+# Typical installation location:
+# C:\Users\YourName\.cargo\bin\uv.exe (installer)
+# C:\Users\YourName\AppData\Local\Programs\Python\Python312\Scripts\uv.exe (pip)
+
+# If still not working, use full path temporarily:
+C:\Users\$env:USERNAME\.cargo\bin\uv.exe --version
+```
+
+### 4. Install Dependencies
 
 ```powershell
 # Install dependencies from pyproject.toml (from repo root)
 uv sync
 ```
 
-### 4. Configure Environment
+### 5. Configure Environment
 
 ```powershell
 # Copy example config and edit it
@@ -54,13 +263,13 @@ copy .env.example .env
 # Edit .env with your API keys and paths
 ```
 
-### 5. Configure LLM Provider
+### 6. Configure LLM Provider
 
 Choose one of the options below and update your `.env` file.
 
 **Note:** If you want local inference (recommended for cost savings), install Ollama and pull a code-capable model like `qwen2.5-coder:7b` or `llama3.1:14b`.
 
-### 6. Run Analysis
+### 7. Run Analysis
 
 ```bash
 # From repo root directory
