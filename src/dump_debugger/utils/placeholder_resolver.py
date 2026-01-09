@@ -40,25 +40,28 @@ class PlaceholderResolver:
         'address': [
             # Object addresses from dumpheap output: Address MT Size
             # Pattern: 16-digit hex address at start of line, followed by MT and Size
+            # Use capturing group to get just the address (first column)
             re.compile(r'^(?:0x)?([0-9a-f]{12,16})\s+(?:0x)?[0-9a-f]{8,16}\s+\d+', re.IGNORECASE | re.MULTILINE),
-            # Generic hex addresses (fallback)
-            re.compile(r'\b(?:0x)?[0-9a-f]{12,16}\b', re.IGNORECASE),
+            # Object addresses that are NOT high kernel/code addresses
+            # True heap objects: 0x0000000000000000 to 0x0000003fffffffff (low 2GB range)
+            # Avoid: 0x00007ff... (method tables), 0x00007ffe... (system DLLs)
+            re.compile(r'\b(?:0x)?0{4,8}([0-3][0-9a-f]{7,11})\b', re.IGNORECASE),
         ],
         'mt': [
             # MethodTable from dumpheap -stat output: MT    Count TotalSize Class Name
             re.compile(r'^([0-9a-f]{8,16})\s+\d+\s+\d+', re.IGNORECASE | re.MULTILINE),
             # MT from object inspection: MT: 0x00007ff8a1234567
             re.compile(r'MT:\s*(?:0x)?([0-9a-f]{8,16})', re.IGNORECASE),
-            # Any hex address that might be an MT
-            re.compile(r'\b(?:0x)?[0-9a-f]{8,16}\b', re.IGNORECASE),
+            # Any hex address that might be an MT (typically high addresses 0x7ff...)
+            re.compile(r'\b(?:0x)?([4-9a-f][0-9a-f]{7,15})\b', re.IGNORECASE),
         ],
         'object': [
             # Object addresses from dumpheap: Address MT Size (at start of line)
             re.compile(r'^(?:0x)?([0-9a-f]{12,16})\s+(?:0x)?[0-9a-f]{8,16}\s+\d+', re.IGNORECASE | re.MULTILINE),
-            # Object addresses in various formats
-            re.compile(r'(?:Object|Address):\s*(?:0x)?([0-9a-f]{12,16})', re.IGNORECASE),
-            # Any long hex address (12-16 digits to avoid picking up small numbers)
-            re.compile(r'\b(?:0x)?[0-9a-f]{12,16}\b', re.IGNORECASE),
+            # Object addresses after labels (ONLY true low range - require leading zeros)
+            re.compile(r'(?:Object|Address):\s*(?:0x)?0{4,8}([0-3][0-9a-f]{7,11})', re.IGNORECASE),
+            # Heap object addresses - must have leading zeros to avoid high addresses
+            re.compile(r'\b(?:0x)?0{4,8}([0-3][0-9a-f]{7,11})\b', re.IGNORECASE),
         ],
         'thread': [
             # Thread IDs in various formats
@@ -245,10 +248,18 @@ class PlaceholderResolver:
             if placeholder_type in ('address', 'object', 'mt'):
                 filtered_values = []
                 for value in values:
-                    # Normalize for comparison
-                    norm_value = value if value.startswith('0x') else '0x' + value
-                    if norm_value not in used_addresses and norm_value not in invalid_addresses:
-                        filtered_values.append(value)
+                    # Normalize: ensure 0x prefix and pad to 16 digits for comparison
+                    if not value.startswith('0x'):
+                        value = '0x' + value
+                    # Pad to 16 hex digits (64-bit address) for consistent comparison
+                    if len(value) < 18:  # 0x + 16 digits = 18 chars
+                        value = '0x' + value[2:].zfill(16)
+                    
+                    # Skip if already used or invalid
+                    if value in used_addresses or value in invalid_addresses:
+                        continue
+                    
+                    filtered_values.append(value)
                 values = filtered_values
             
             if not values:

@@ -49,6 +49,7 @@ def cli() -> None:
     type=click.Path(path_type=Path),
     help="Save all console output to log file for later analysis"
 )
+
 def analyze(
     dump_path: Path,
     issue: str,
@@ -67,6 +68,7 @@ def analyze(
         if interactive:
             console.print("[cyan]Interactive mode enabled - you can ask follow-up questions after analysis[/cyan]")
         
+
         # Run the hypothesis-driven analysis
         report = run_analysis(
             dump_path, 

@@ -8,6 +8,7 @@ from rich.console import Console
 from dump_debugger.core import DebuggerWrapper
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, Evidence
+from dump_debugger.utils.command_healer import CommandHealer
 
 console = Console()
 
@@ -18,6 +19,7 @@ class InvestigatorAgent:
     def __init__(self, debugger: DebuggerWrapper):
         self.debugger = debugger
         self.llm = get_llm(temperature=0.1)
+        self.healer = CommandHealer()
     
     def investigate_task(self, state: AnalysisState) -> dict:
         """Execute investigation task and collect evidence using expert-level approach."""
@@ -27,22 +29,11 @@ class InvestigatorAgent:
         from langchain_core.messages import HumanMessage, SystemMessage
         from dump_debugger.expert_knowledge import (
             get_efficient_commands_for_hypothesis,
-            KNOWN_PATTERNS,
-            get_investigation_focus
         )
         
         hypothesis = state.get('current_hypothesis', '')
         prev_evidence = state.get('evidence_inventory', {}).get(task, [])
         supports_dx = state.get('supports_dx', False)
-        
-        # Get expert guidance for this type of investigation
-        pattern_context = ""
-        for pattern_name, pattern in KNOWN_PATTERNS.items():
-            if any(keyword in hypothesis.lower() for keyword in pattern_name.split('_')):
-                focus_areas = get_investigation_focus(pattern_name)
-                pattern_context = f"\n\nEXPERT GUIDANCE for {pattern['name']}:\n"
-                pattern_context += "\n".join(f"- {area}" for area in focus_areas)
-                break
         
         # Get efficient command suggestions
         efficient_cmds = get_efficient_commands_for_hypothesis(task, supports_dx)
@@ -70,11 +61,20 @@ STRICT INSTRUCTIONS:
 5. Preserve the exact command syntax mentioned in the task
 6. For ranges like "5-10 objects", use the middle value (e.g., 7 objects)
 
+SPECIAL HANDLING FOR THREAD-SPECIFIC COMMANDS:
+If the task mentions running a command "on sample threads" or "for N threads":
+- First include "!threads" command to list all threads
+- Then for each sample thread, include "~<threadnum>e <command>" (NOT just the command alone)
+- Example: For "!clrstack on 5 sample threads", generate:
+  ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"]
+- Use <thread> as placeholder - we'll replace with actual thread numbers from !threads output
+
 CRITICAL COMMAND SYNTAX RULES:
 - ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
 - FORBIDDEN: pipes (|), foreach, findstr, grep, where-object, select-object, $_ variables
 - Extract exact commands mentioned in the task (e.g., if task says "!threadpool", use "!threadpool")
 - For "!do on N objects" type commands, use a placeholder address like "!do <addr>" (one command per object)
+- For thread-specific commands, use "~<thread>e <command>" syntax with <thread> placeholder
 
 Return ONLY valid JSON in this exact format:
 {{
@@ -88,6 +88,9 @@ Response: {{"commands": ["!dumpheap -stat", "!do <addr>", "!do <addr>", "!do <ad
 
 Task: "Run '!dumpheap -mt 00007ff8' then '!do' on 5-10 Thread objects"
 Response: {{"commands": ["!dumpheap -mt 00007ff8", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap followed by !do on 7 Thread objects (middle of 5-10 range)"}}
+
+Task: "Use !threads then !clrstack for 10 sample threads"
+Response: {{"commands": ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"], "rationale": "getting threads then running clrstack on 10 sample threads"}}
 """
         else:
             prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.
@@ -96,8 +99,62 @@ CONFIRMED HYPOTHESIS: {hypothesis}
 INVESTIGATION TASK: {task}
 DUMP SUPPORTS DATA MODEL: {supports_dx}
 Previous Evidence: {len(prev_evidence)} items
-{pattern_context}
 {cmd_suggestions}
+
+CRITICAL - RECOGNIZE GAP-FILLING REQUESTS:
+If the task includes "Suggested approach:" this is a GAP-FILLING request from iterative reasoning.
+The reasoner has identified missing correlation data and is requesting SPECIFIC new commands.
+
+WHEN YOU SEE "Suggested approach:" IN THE TASK:
+1. Parse the suggested approach carefully - it tells you WHAT COMMANDS to use
+2. Generate those EXACT commands, do NOT default to basic commands like !threads
+3. Focus on NEW evidence, not repeating commands already executed
+4. Examples of gap-filling commands:
+   - !finalizequeue (to see finalization queue depth)
+   - !dumpheap -type ClassName (to find specific object types)
+   - !do <address> (to inspect object references)
+   - !gcroot <address> (to find object roots)
+
+Example Task: "What objects are queued for finalization? Suggested approach: Use !finalizequeue to see queue"
+→ You MUST generate: !finalizequeue
+→ Do NOT generate: !threads (already have that)
+
+HANDLING DEEPER INVESTIGATION REQUESTS:
+This task may come from the reasoner identifying gaps in object graph correlation. These are complex questions 
+requiring multi-step investigation strategies. Common patterns:
+
+1. CORRELATING SEPARATE OBJECT GRAPHS:
+   Problem: "Found 50 TimeoutException objects and 100 SqlCommand objects, but cannot establish correlation"
+   Strategy: 
+   - Use !do on exception objects to extract references to related objects
+   - Look for fields like "m_command", "_source", "m_innerException" that may hold references
+   - Follow object addresses through !do chains to establish correlation
+   
+2. MAPPING OBJECTS TO THREADS:
+   Problem: "Which threads are associated with these timeout objects?"
+   Strategy:
+   - Use !threads to see all managed threads
+   - Use !clrstack on each thread to see stack frames
+   - Match object addresses from stack references to timeout objects
+   - Alternative: Use !gcroot <address> to find thread references
+   
+3. EXTRACTING NESTED DATA:
+   Problem: "What SQL queries were executed by these SqlCommand objects?"
+   Strategy:
+   - !do <SqlCommand address> to inspect object
+   - Look for string fields like "m_commandText" or "_commandText"
+   - Use !do on nested string addresses to get actual SQL text
+   
+4. LINKING EXCEPTIONS TO SOURCES:
+   Problem: "Which methods threw these exceptions?"
+   Strategy:
+   - !do on exception object
+   - Examine "_stackTrace" or "_stackTraceString" fields
+   - Use !do on StackTrace object if it's a reference
+   - Cross-reference with !clrstack output on relevant threads
+
+For investigation requests, break the problem into logical steps and return the FIRST command needed.
+The workflow will call you iteratively to execute the full investigation chain.
 
 Think like an expert debugger - you know WHAT the problem is (hypothesis confirmed), now find WHERE and WHY.
 {"PREFER 'dx' commands with filters (.Select, .Where, .Take) for concise output." if supports_dx else "Use traditional WinDbg/SOS commands."}
@@ -119,6 +176,10 @@ CRITICAL SYNTAX RULES:
 - OSID in brackets: DO NOT include "0x" prefix (use ~~[3fc]s NOT ~~[0x3fc]s)
 - When referencing OSID in text: DO include "0x" prefix ("OSID 0x3fc" for clarity)
 - Prefer 'e' (execute) over 's' (switch) when examining specific thread without changing context
+- NEVER generate separate thread switch and command - ALWAYS combine them with 'e'
+  - WRONG: ["~3s", "!clrstack"]  ← Two separate commands
+  - RIGHT: ["~3e !clrstack"]     ← One atomic command
+- Thread context commands MUST be atomic: ~3e !clrstack, NOT ~3s followed by !clrstack
 
 IMPORTANT: When !syncblk shows "thread 12" as lock holder, this is the MANAGED THREAD ID.
 To investigate this thread:
@@ -187,17 +248,47 @@ Return ONLY valid JSON in this exact format:
                 commands_to_execute = [result['command'].strip()]
                 rationale = result.get('rationale', '')
             
-            # Validate all commands against PowerShell syntax
+            # Validate all commands against PowerShell syntax and filter setup commands
             powershell_patterns = ['| foreach', '| findstr', '| grep', '| where', '| select', '$_']
+            setup_commands = ['.loadby sos', '.load sos', 'lmm sos', '.sympath', '.reload', '.cordll']
+            
             cleaned_commands = []
-            for cmd in commands_to_execute:
-                if any(pattern in cmd.lower() for pattern in powershell_patterns):
+            i = 0
+            while i < len(commands_to_execute):
+                cmd = commands_to_execute[i]
+                cmd_lower = cmd.lower().strip()
+                
+                # Filter out setup/initialization commands
+                if any(setup_cmd in cmd_lower for setup_cmd in setup_commands):
+                    console.print(f"[yellow]⚠ Skipping setup command (already initialized): {cmd}[/yellow]")
+                    i += 1
+                    continue
+                
+                # Validate PowerShell syntax
+                if any(pattern in cmd_lower for pattern in powershell_patterns):
                     console.print(f"[yellow]⚠ Invalid command (contains PowerShell syntax): {cmd}[/yellow]")
                     # Use fallback: extract the WinDbg part before the pipe
                     if '|' in cmd:
                         cmd = cmd.split('|')[0].strip()
                         console.print(f"[yellow]  Cleaned to: {cmd}[/yellow]")
+                
+                # Fix separated thread commands: combine ~Xs followed by !command into ~Xe !command
+                if cmd.startswith('~') and cmd.endswith('s'):
+                    # Check if next command is a SOS command without thread prefix
+                    if i + 1 < len(commands_to_execute):
+                        next_cmd = commands_to_execute[i + 1].strip()
+                        if next_cmd.startswith('!') and not next_cmd.startswith('~'):
+                            # Combine them with 'e' instead of 's'
+                            thread_part = cmd[:-1]  # Remove 's' from ~3s
+                            combined = f"{thread_part}e {next_cmd}"
+                            console.print(f"[yellow]⚠ Combining separated thread commands:[/yellow]")
+                            console.print(f"[yellow]  {cmd} + {next_cmd} → {combined}[/yellow]")
+                            cleaned_commands.append(combined)
+                            i += 2  # Skip next command since we combined it
+                            continue
+                
                 cleaned_commands.append(cmd)
+                i += 1
             
             commands_to_execute = cleaned_commands
             
@@ -227,6 +318,13 @@ Return ONLY valid JSON in this exact format:
         # Track which addresses have been used and which are invalid
         used_addresses = set()
         invalid_addresses = set()
+        # Track thread IDs from !threads output for thread placeholder resolution
+        available_thread_ids = []
+        used_thread_ids = set()
+        # Track consecutive failures for early stopping
+        consecutive_failures = 0
+        last_failure_message = None
+        max_consecutive_failures = 3
         
         for i, command in enumerate(commands_to_execute):
             # Detect any placeholder pattern <...>
@@ -234,6 +332,18 @@ Return ONLY valid JSON in this exact format:
             
             # Build evidence list for placeholder resolution
             evidence_for_resolution = []
+            
+            # First, add evidence from previous tasks in inventory (enables reuse across tasks)
+            for task_key, task_evidence_list in inventory.items():
+                for evidence_item in task_evidence_list:
+                    evidence_for_resolution.append({
+                        'command': evidence_item.get('command', ''),
+                        'output': evidence_item.get('output', '') or evidence_item.get('summary', ''),
+                        'evidence_type': evidence_item.get('evidence_type', 'inline'),
+                        'evidence_id': evidence_item.get('evidence_id')
+                    })
+            
+            # Then, add outputs from current task execution
             for j, output in enumerate(previous_outputs):
                 evidence_for_resolution.append({
                     'command': commands_to_execute[j] if j < len(commands_to_execute) else 'unknown',
@@ -241,7 +351,43 @@ Return ONLY valid JSON in this exact format:
                     'evidence_type': 'inline'
                 })
             
-            # Check for placeholders and try to resolve them
+            # Special handling for <thread> placeholder
+            if '<thread>' in command:
+                if not available_thread_ids:
+                    # Parse thread IDs from previous !threads output
+                    for evidence in evidence_for_resolution:
+                        if evidence.get('command', '').startswith('!threads'):
+                            # Extract debugger thread numbers (DBG column)
+                            thread_pattern = r'^\s*(\d+)\s+' # Matches debugger thread number at start of line
+                            for line in evidence.get('output', '').split('\n'):
+                                match = re.match(thread_pattern, line.strip())
+                                if match:
+                                    thread_id = match.group(1)
+                                    if thread_id.isdigit():
+                                        available_thread_ids.append(thread_id)
+                    console.print(f"  [dim]Found {len(available_thread_ids)} threads to sample[/dim]")
+                
+                if available_thread_ids:
+                    # Get next unused thread ID
+                    unused_threads = [tid for tid in available_thread_ids if tid not in used_thread_ids]
+                    if unused_threads:
+                        selected_thread = unused_threads[0]
+                        used_thread_ids.add(selected_thread)
+                        command = command.replace('<thread>', selected_thread)
+                        console.print(f"  [green]✓ Resolved <thread> to thread {selected_thread}[/green]")
+                    else:
+                        console.print(f"  [yellow]⚠ All threads exhausted, reusing threads[/yellow]")
+                        # Reset and reuse
+                        used_thread_ids.clear()
+                        selected_thread = available_thread_ids[0]
+                        used_thread_ids.add(selected_thread)
+                        command = command.replace('<thread>', selected_thread)
+                else:
+                    console.print(f"  [red]✗ No thread IDs available - run !threads first[/red]")
+                    console.print(f"  [yellow]⚠ Skipping command with unresolved <thread> placeholder[/yellow]")
+                    continue
+            
+            # Check for other placeholders (addresses, etc.) and try to resolve them
             if detect_placeholders(command):
                 console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {command}")
                 
@@ -255,12 +401,15 @@ Return ONLY valid JSON in this exact format:
                 
                 if success:
                     console.print(f"  [green]✓ Resolved to:[/green] {resolved_command}")
-                    # Track which address was used
+                    # Track which address was used (normalize to 16-digit format)
                     addr_match = re.search(r'(?:0x)?[0-9a-f]{8,16}', resolved_command, re.IGNORECASE)
                     if addr_match:
                         used_addr = addr_match.group(0)
                         if not used_addr.startswith('0x'):
                             used_addr = '0x' + used_addr
+                        # Normalize: pad to 16 hex digits for consistent tracking
+                        if len(used_addr) < 18:  # 0x + 16 digits
+                            used_addr = '0x' + used_addr[2:].zfill(16)
                         used_addresses.add(used_addr)
                     command = resolved_command
                 else:
@@ -274,10 +423,16 @@ Return ONLY valid JSON in this exact format:
             else:
                 console.print(f"  [dim]→ {command}[/dim]")
             
-            # Execute command with evidence analysis
-            result = self.debugger.execute_command_with_analysis(
+            # Execute command with evidence analysis and auto-healing
+            result = self._execute_with_healing(
                 command=command,
-                intent=f"Investigating: {task} (step {i+1}/{len(commands_to_execute)})"
+                task=task,
+                step_info=f"step {i+1}/{len(commands_to_execute)}",
+                context={
+                    'previous_evidence': evidence_for_resolution,
+                    'used_addresses': used_addresses,
+                    'invalid_addresses': invalid_addresses
+                }
             )
             
             # Extract output properly (it's a dict!)
@@ -327,15 +482,70 @@ Return ONLY valid JSON in this exact format:
                     console.print(f"[dim cyan]  Result: {preview}[/dim cyan]")
             
             # Track invalid addresses (objects not found)
-            if 'not found' in output_str.lower() or 'invalid' in output_str.lower():
+            if 'not found' in output_str.lower() or 'invalid' in output_str.lower() or 'not a valid' in output_str.lower():
                 # Extract the address from the command (e.g., !do 0x123456)
                 addr_match = re.search(r'(?:0x)?[0-9a-f]{8,16}', command, re.IGNORECASE)
                 if addr_match:
                     invalid_addr = addr_match.group(0)
                     if not invalid_addr.startswith('0x'):
                         invalid_addr = '0x' + invalid_addr
+                    # Normalize: pad to 16 hex digits for consistent tracking
+                    if len(invalid_addr) < 18:  # 0x + 16 digits
+                        invalid_addr = '0x' + invalid_addr[2:].zfill(16)
                     invalid_addresses.add(invalid_addr)
                     console.print(f"  [dim red]→ Marking {invalid_addr} as invalid[/dim red]")
+            
+            # Early stopping: detect repeated identical failures
+            # BUT: Don't stop for address-related failures when we have placeholders
+            is_failure = (
+                'not found' in output_str.lower() or 
+                'invalid' in output_str.lower() or
+                'does not contain' in output_str.lower() or
+                'error' in output_str.lower() or
+                len(output_str) < 100  # Very small output often indicates failure
+            )
+            
+            # Check if this is an address-related failure (invalid address, not command failure)
+            is_address_failure = (
+                'not a valid' in output_str.lower() or
+                'invalid object' in output_str.lower() or
+                'not found' in output_str.lower() or
+                'object has an invalid class' in output_str.lower()
+            )
+            
+            # Detect if command uses placeholders (will cycle to next address)
+            from dump_debugger.utils import detect_placeholders
+            has_placeholders = detect_placeholders(command)
+            
+            if is_failure:
+                # For commands with placeholders and address failures, don't count toward stopping
+                # The system will automatically cycle to the next address
+                if has_placeholders and is_address_failure:
+                    # This is expected - some addresses may be invalid/stale
+                    # Just continue to next address, don't count as "consecutive failure"
+                    pass
+                else:
+                    # Real failure (syntax error, command broken, etc.)
+                    failure_sig = output_str[:100].lower().strip()
+                    
+                    if failure_sig == last_failure_message:
+                        consecutive_failures += 1
+                        console.print(f"  [yellow]⚠ Consecutive failure #{consecutive_failures}[/yellow]")
+                        
+                        if consecutive_failures >= max_consecutive_failures:
+                            remaining = len(commands_to_execute) - i - 1
+                            if remaining > 0:
+                                console.print(f"  [red]✗ Stopping after {consecutive_failures} identical non-address failures[/red]")
+                                console.print(f"  [dim]  Skipping {remaining} remaining commands[/dim]")
+                                console.print(f"  [dim cyan]Failure: '{failure_sig[:50]}...'[/dim cyan]")
+                                break  # Exit the command execution loop
+                    else:
+                        consecutive_failures = 1
+                        last_failure_message = failure_sig
+            else:
+                # Success - reset counter
+                consecutive_failures = 0
+                last_failure_message = None
             
             # Create evidence entry
             # For external evidence, output_str is already the summary (set by execute_command_with_analysis)
@@ -358,6 +568,7 @@ Return ONLY valid JSON in this exact format:
                 'summary': analysis.get('summary') if analysis else None
             }
             
+
             inventory[task].append(evidence)
             all_commands.append(command)
             
@@ -414,7 +625,109 @@ Return ONLY valid JSON in this exact format:
             if len(all_commands) > 30:
                 all_commands = all_commands[-30:]
         
+        # Log healing stats if any heals occurred
+        heal_stats = self.healer.get_stats()
+        if heal_stats['successful_heals'] > 0:
+            console.print(f"[dim cyan]🔧 Healed {heal_stats['successful_heals']} failed command(s) during investigation[/dim cyan]")
+        
         return {
             'evidence_inventory': inventory,
             'commands_executed': all_commands
         }
+    
+    def _execute_with_healing(self, command: str, task: str, step_info: str, context: dict) -> dict:
+        """Execute command with automatic healing on failure.
+        
+        Args:
+            command: Command to execute
+            task: Investigation task description
+            step_info: Step information for display
+            context: Execution context with previous evidence, used addresses, etc.
+            
+        Returns:
+            Command execution result dict
+        """
+        max_heal_attempts = 2
+        attempt = 0
+        current_command = command
+        
+        while attempt <= max_heal_attempts:
+            # Execute the command
+            result = self.debugger.execute_command_with_analysis(
+                command=current_command,
+                intent=f"Investigating: {task} ({step_info})"
+            )
+            
+            # Check if command failed
+            if isinstance(result, dict):
+                output = result.get('output', '')
+                success = result.get('success', True)
+                
+                # Precise failure detection - only trigger on actual command failures
+                # Check for specific WinDbg error patterns, not analyzer commentary
+                output_start = output[:300].strip() if output else ""
+                
+                # Only flag as failed if output looks like an actual debugger error
+                failed = (
+                    not success or
+                    output.startswith('Error:') or
+                    output.startswith('0:000> Error') or
+                    'Unable to ' in output_start or  # WinDbg errors start with "Unable to"
+                    'Cannot ' in output_start or     # "Cannot load/find/access"
+                    'Syntax error' in output_start or
+                    'Unknown command' in output_start or
+                    'No export' in output_start or
+                    'does not have a valid' in output_start or  # "does not have a valid class field"
+                    'is not a valid' in output_start or         # "is not a valid object"
+                    'Bad address' in output_start or
+                    (len(output) < 50 and ('error' in output.lower() or 'invalid' in output.lower()))
+                )
+                
+                if failed and attempt < max_heal_attempts:
+                    # Attempt to heal the command
+                    healed_command = self.healer.heal_command(
+                        current_command, 
+                        output,
+                        context
+                    )
+                    
+                    if healed_command:
+                        # Check if healer is fundamentally changing command type (bad sign)
+                        orig_base_cmd = current_command.split()[0].lower().strip('!')
+                        healed_base_cmd = healed_command.split()[0].lower().strip('!')
+                        
+                        # If command type changed dramatically (e.g., !do → !dumpmt), stop healing
+                        incompatible_changes = [
+                            ('do', 'dumpmt'), ('do', 'dumpclass'), ('do', 'dumpmodule'),
+                            ('pe', 'dumpmt'), ('pe', 'dumpclass'), ('pe', 'dumpmodule'),
+                            ('dumpobj', 'dumpmt'), ('dumpobj', 'dumpclass'),
+                        ]
+                        
+                        command_changed_incompatibly = False
+                        for orig, healed in incompatible_changes:
+                            if orig in orig_base_cmd and healed in healed_base_cmd:
+                                command_changed_incompatibly = True
+                                console.print(f"  [yellow]⚠ Healer changed command type ({orig} → {healed}), likely address type mismatch[/yellow]")
+                                break
+                        
+                        if command_changed_incompatibly:
+                            # Address is wrong type, don't retry
+                            console.print(f"  [dim yellow]→ Skipping command - address type mismatch detected[/dim yellow]")
+                            return result
+                        
+                        attempt += 1
+                        current_command = healed_command
+                        console.print(f"  [yellow]⚠ Retry {attempt}/{max_heal_attempts} with healed command[/yellow]")
+                        continue  # Retry with healed command
+                    else:
+                        # Can't heal, return failure
+                        return result
+                else:
+                    # Success or max attempts reached
+                    return result
+            else:
+                # Non-dict result, return as-is
+                return result
+        
+        # Max attempts reached, return last result
+        return result

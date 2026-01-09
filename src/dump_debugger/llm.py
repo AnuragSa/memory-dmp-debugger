@@ -5,8 +5,9 @@ from typing import Any
 from anthropic import AnthropicFoundry
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
-from langchain_ollama import ChatOllama
+from langchain_core.embeddings import Embeddings
+from langchain_openai import AzureChatOpenAI, ChatOpenAI, OpenAIEmbeddings, AzureOpenAIEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from rich.console import Console
 
 try:
@@ -175,4 +176,51 @@ def get_structured_llm(temperature: float = 0.0) -> BaseChatModel:
     # and we rely on the prompt engineering
     
     return llm
+
+
+def get_embeddings() -> Embeddings:
+    """Get embeddings model based on configured LLM provider.
+    
+    Returns:
+        Embeddings instance for semantic search
+        
+    Raises:
+        ValueError: If provider doesn't support embeddings or is not configured
+    """
+    provider = settings.llm_provider.lower()
+    
+    if provider == "openai":
+        return OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            api_key=settings.openai_api_key
+        )
+    
+    elif provider == "azure":
+        # For Azure, embeddings require a separate deployment
+        # Skip if not configured - will fall back to keyword matching
+        raise ValueError(
+            "Azure embeddings not configured. "
+            "Deploy 'text-embedding-3-small' in Azure OpenAI and set AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT env var. "
+            "Falling back to keyword matching."
+        )
+    
+    elif provider == "ollama":
+        # Ollama with local embeddings model
+        return OllamaEmbeddings(
+            model=settings.local_embeddings_model or "nomic-embed-text",
+            base_url=settings.local_llm_base_url
+        )
+    
+    elif provider == "anthropic":
+        # Anthropic doesn't provide embeddings, fall back to OpenAI
+        console.print("[yellow]⚠ Anthropic doesn't provide embeddings, using OpenAI text-embedding-3-small[/yellow]")
+        if not settings.openai_api_key:
+            raise ValueError("OpenAI API key required for embeddings when using Anthropic LLM")
+        return OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            api_key=settings.openai_api_key
+        )
+    
+    else:
+        raise ValueError(f"Embeddings not supported for provider: {provider}")
 

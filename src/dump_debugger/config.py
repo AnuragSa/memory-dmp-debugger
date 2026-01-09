@@ -56,6 +56,10 @@ class Settings(BaseSettings):
         default="llama3.1:14b",
         description="Local LLM model name (e.g., llama3.1:14b, mistral:7b)"
     )
+    local_embeddings_model: str = Field(
+        default="nomic-embed-text",
+        description="Ollama embeddings model name for semantic pattern matching"
+    )
     local_llm_timeout: int = Field(
         default=120,
         description="Timeout for local LLM requests in seconds"
@@ -99,6 +103,11 @@ class Settings(BaseSettings):
 
     # Application Configuration
     log_level: str = Field(default="INFO", description="Logging level")
+    sessions_base_dir: str = Field(
+        default=".sessions",
+        description="Base directory for analysis sessions"
+    )
+
     max_iterations: int = Field(
         default=15,
         description="Maximum number of debugger iterations"
@@ -134,6 +143,7 @@ class Settings(BaseSettings):
         description="LangGraph recursion limit - max graph iterations (each chat question counts as 1)"
     )
     
+
     # Evidence management
     evidence_storage_threshold: int = Field(
         default=250000,
@@ -172,11 +182,7 @@ class Settings(BaseSettings):
         description="Azure OpenAI embeddings API key (defaults to azure_openai_api_key if not set)"
     )
     
-    # Session management
-    sessions_base_dir: str = Field(
-        default=".sessions",
-        description="Base directory for analysis sessions"
-    )
+    # Session management (moved above - kept here for backwards compatibility reference)
     session_cleanup_days: int = Field(
         default=7,
         description="Delete sessions older than this many days"

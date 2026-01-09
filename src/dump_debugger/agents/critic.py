@@ -97,7 +97,10 @@ Return ONLY a JSON array of question strings, nothing else:
         """
         current_round = state.get('critique_round', 0) + 1  # Pure: read from state
         
-        console.print(f"\n[bold magenta]🔍 Critic Agent - Round {current_round}/{self.max_rounds}[/bold magenta]")
+        # Only show header for first round (visible critique)
+        # Second round is silent verification for follow-up questions only
+        if current_round == 1:
+            console.print(f"\n[bold magenta]🔍 Quality Review[/bold magenta]")
         
         # Get analysis components
         issue_description = state.get('issue_description', 'Unknown issue')
@@ -204,28 +207,31 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
             
             result = json.loads(content.strip())
             
-            # Display results
-            if result.get('issues_found', False):
-                console.print(f"[yellow]⚠ Issues Found ({result.get('severity', 'medium')} severity)[/yellow]")
-                for issue in result.get('critical_issues', []):
-                    issue_type = issue.get('type', 'unknown')
-                    description = issue.get('description', '')
-                    console.print(f"  • [{issue_type}] {description}")
-                
-                if result.get('suggested_actions'):
-                    console.print("[dim]Suggested actions:[/dim]")
-                    for action in result['suggested_actions']:
-                        console.print(f"    - {action}")
-                
-                # Generate follow-up questions if this is the final round with issues
-                suggested_questions = []
-                if current_round >= self.max_rounds:
-                    console.print("\n[dim]Generating follow-up questions...[/dim]")
-                    issue_description = state.get('issue_description', 'Unknown issue')
-                    suggested_questions = self.generate_follow_up_questions(result, issue_description)
-                    result['suggested_questions'] = suggested_questions
-            else:
-                console.print("[green]✓ No critical issues found[/green]")
+            # Display results only for Round 1 (visible critique)
+            # Round 2 is silent - only generates follow-up questions if needed
+            if current_round == 1:
+                if result.get('issues_found', False):
+                    console.print(f"[yellow]⚠ Issues Found ({result.get('severity', 'medium')} severity)[/yellow]")
+                    for issue in result.get('critical_issues', []):
+                        issue_type = issue.get('type', 'unknown')
+                        description = issue.get('description', '')
+                        console.print(f"  • [{issue_type}] {description}")
+                    
+                    if result.get('suggested_actions'):
+                        console.print("[dim]Suggested actions:[/dim]")
+                        for action in result['suggested_actions']:
+                            console.print(f"    - {action}")
+                else:
+                    console.print("[green]✓ No critical issues found[/green]")
+            
+            # Generate follow-up questions if this is the final round with issues
+            suggested_questions = []
+            if current_round >= self.max_rounds and result.get('issues_found', False):
+                if current_round > 1:
+                    # Round 2 with remaining issues - silent generation
+                    console.print("\n[dim yellow]⚠ Some gaps remain - generating follow-up questions...[/dim yellow]")
+                suggested_questions = self.generate_follow_up_questions(result, state.get('issue_description', 'Unknown issue'))
+                result['suggested_questions'] = suggested_questions
             
             # Update state
             return {

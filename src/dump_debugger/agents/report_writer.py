@@ -150,23 +150,83 @@ class ReportWriterAgentV2:
         }
     
     def _generate_failure_report(self, state: AnalysisState) -> dict:
-        """Generate report when all hypotheses were rejected."""
+        """Generate report when all hypotheses were rejected - but show what we learned."""
         issue = state.get('issue_description', 'Unknown issue')
         hypothesis_tests = state.get('hypothesis_tests', [])
+        analysis = state.get('reasoner_analysis', '')
+        conclusions = state.get('conclusions', [])
+        confidence = state.get('confidence_level', 'medium')
         
-        # Build rejection history
-        rejection_summary = []
+        # Build tested hypotheses list
+        tested_hypotheses = []
         for i, test in enumerate(hypothesis_tests, 1):
-            result = test.get('result', 'UNKNOWN')
             hyp = test['hypothesis']
-            reasoning = test.get('evaluation_reasoning', 'No reasoning provided')[:300]
-            rejection_summary.append(f"\n{i}. **{hyp}**\n   Result: {result.upper()}\n   Reason: {reasoning}...")
+            tested_hypotheses.append(f"{i}. {hyp}")
         
-        rejection_text = "\n".join(rejection_summary)
+        tested_text = "\n".join(tested_hypotheses)
         
-        report = f"""
-INVESTIGATION FAILED - All Hypotheses Rejected
+        # Build conclusions with confidence indicators
+        conclusions_text = "\n".join([f"• {c}" for c in conclusions]) if conclusions else "• Evidence collected but root cause remains unclear"
+        
+        # Check if reasoner provided actionable findings despite rejections
+        has_positive_findings = analysis and len(analysis) > 200
+        
+        if has_positive_findings:
+            # We have substantial analysis - present as "what we learned"
+            report = f"""
+ANALYSIS COMPLETE - Root Cause Investigation
 =============================================
+
+Original Issue: {issue}
+
+Investigation Path:
+------------------
+The analysis tested {len(hypothesis_tests)} hypotheses through systematic evidence collection:
+
+{tested_text}
+
+While these specific theories were ruled out by evidence, the investigation revealed important findings about the actual system state.
+
+═══════════════════════════════════════════════════════════════════
+FINDINGS FROM EVIDENCE
+═══════════════════════════════════════════════════════════════════
+
+{analysis}
+
+Key Takeaways:
+--------------
+{conclusions_text}
+
+Analysis Confidence: {confidence.upper()}
+
+What This Means:
+----------------
+The systematic investigation ruled out several common failure patterns and collected concrete evidence about the system's actual state.
+{self._interpret_confidence_level(confidence, has_ruling_out=True)}
+
+Next Steps:
+-----------
+1. Review the "FINDINGS FROM EVIDENCE" section above - it describes what IS happening in the system
+2. Compare findings against expected behavior for your application
+3. Use interactive mode to drill deeper into specific observations
+4. Consider if the issue might be in areas not yet explored (external dependencies, timing-sensitive conditions, etc.)
+
+For deeper analysis, use the interactive mode to ask specific questions about the evidence collected.
+"""
+        else:
+            # Minimal analysis - traditional failure report
+            rejection_summary = []
+            for i, test in enumerate(hypothesis_tests, 1):
+                result = test.get('result', 'UNKNOWN')
+                hyp = test['hypothesis']
+                reasoning = test.get('evaluation_reasoning', 'No reasoning provided')[:300]
+                rejection_summary.append(f"\n{i}. **{hyp}**\n   Result: {result.upper()}\n   Reason: {reasoning}...")
+            
+            rejection_text = "\n".join(rejection_summary)
+            
+            report = f"""
+INVESTIGATION INCOMPLETE - Insufficient Evidence
+================================================
 
 Original Issue: {issue}
 
@@ -201,6 +261,24 @@ For interactive analysis, you can ask specific questions about the dump data tha
             'final_report': report.strip(),
             'should_continue': False
         }
+    
+    def _interpret_confidence_level(self, confidence: str, has_ruling_out: bool = False) -> str:
+        """Provide context for confidence level."""
+        if has_ruling_out:
+            # When we ruled things out
+            interpretations = {
+                'high': 'The evidence provides strong clarity about what is NOT causing the issue and clear observations about the actual system state.',
+                'medium': 'The evidence rules out several possibilities and provides useful observations, though some aspects may need further investigation.',
+                'low': 'The evidence provides some ruling-out value but may need additional data points for complete clarity.'
+            }
+        else:
+            # When we confirmed something
+            interpretations = {
+                'high': 'The evidence provides strong support for the root cause identification with clear causal chains.',
+                'medium': 'The evidence supports the findings but some aspects could benefit from additional validation.',
+                'low': 'The findings are preliminary and should be validated with additional evidence.'
+            }
+        return interpretations.get(confidence, 'Confidence level indicates uncertainty in the analysis.')
     
     def generate_report(self, state: AnalysisState) -> dict:
         """Generate comprehensive analysis report."""
