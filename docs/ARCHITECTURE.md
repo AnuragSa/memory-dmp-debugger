@@ -1,6 +1,6 @@
 # Architecture Guide
 
-This document dhows the project's architecture: the hypothesis-driven workflow, evidence management, specialized analyzers, quality review system, and interactive mode.
+This document describes the project's architecture: the hypothesis-driven workflow, pattern knowledge base, evidence management, specialized analyzers, quality review system, iterative reasoning, and interactive mode.
 
 ## High-Level Flow
 
@@ -37,6 +37,9 @@ User Issue
         
 After confirmation:
   → Reason (synthesize evidence)
+    → Check for investigation gaps (NEW: Iterative Reasoning)
+      → Gaps found? → Loop back to investigate with deeper questions
+      → Max iterations reached or no gaps? → Continue to critique
     → Critique Round 1 (review for gaps/errors)
       → Issues found? → Respond (collect missing evidence, re-analyze)
         → Critique Round 2 (final verification)
@@ -44,6 +47,104 @@ After confirmation:
           → No issues? → Report
       → No issues? → Report
 ```
+
+## Iterative Reasoning Feedback Loop
+
+The tool implements an **iterative reasoning feedback loop** to solve complex object graph correlation problems that cannot be resolved with simple analysis.
+
+### The Problem
+
+Traditional static analysis fails when root cause requires correlating data across separate object graphs in memory. For example:
+- Evidence: "50 SqlConnectionTimeoutErrorInternal objects at addresses X, Y, Z"
+- Evidence: "100 SqlCommand objects in memory"
+- Gap: **Cannot determine which timeout corresponds to which SQL query**
+
+Hardcoded "specialized analyzers" for every possible correlation pattern don't scale.
+
+### The Solution
+
+Use **iterative reasoning** where:
+1. Cloud LLM (reasoner) identifies gaps in correlation
+2. Returns specific investigation requests with questions
+3. Workflow loops back to investigate phase
+4. Local LLM (investigator) generates commands dynamically to answer questions
+5. Loop back to reasoner with new evidence
+6. Max 3 iterations to prevent infinite loops
+
+### Implementation
+
+**State Fields** (`AnalysisState`):
+- `reasoning_iterations: int` - Tracks iteration count (max 3)
+- `needs_deeper_investigation: bool` - Flag set by reasoner when gaps detected
+- `investigation_requests: list[dict[str, str]]` - Specific requests from reasoner
+
+**Investigation Request Structure**:
+```python
+{
+    'question': 'Which SqlCommand objects correspond to timeout exceptions?',
+    'context': 'Found 50 timeout objects and 100 SqlCommand objects but cannot correlate',
+    'approach': 'Use !do on timeout objects to extract SqlCommand references'
+}
+```
+
+**ReasonerAgent Enhancement**: Detects correlation gaps and generates investigation requests
+**Workflow Routing**: `route_after_reason()` loops back to investigate phase when gaps found (max 3 iterations)
+**InvestigatorAgent Strategies**: Includes prompts for common patterns:
+- Correlating separate object graphs (using `!do` chains)
+- Mapping objects to threads (using `!gcroot` or `!clrstack`)
+- Extracting nested data from object fields
+- Linking exceptions to sources via stack traces
+
+### Workflow Example
+
+**Iteration 0 (Initial):**
+```
+Observer: Finds 50 timeout exceptions
+Hypotheses: "Application experiencing SQL timeouts"
+Investigate: Runs !dumpheap -type SqlTimeout
+Reasoner: "Found timeout objects but cannot determine which SQL queries caused them"
+         Sets needs_deeper_investigation = true
+         Returns: [{"question": "Which SqlCommand objects correspond to timeouts?", ...}]
+```
+
+**Iteration 1 (Deeper Investigation):**
+```
+Workflow: Routes back to "investigate" with new plan
+Investigate: Generates !do commands on timeout objects
+            Extracts SqlCommand references from exception fields
+            Runs !do on SqlCommand addresses
+            Extracts SQL text from m_commandText fields
+Reasoner: "Timeout occurred in query: SELECT * FROM LargeTable WHERE..."
+         Sets needs_deeper_investigation = false
+```
+
+**Final Phase:**
+```
+Workflow: Routes to "critique" (no more gaps)
+Critique: Reviews analysis quality
+Report: Generates final report with root cause
+```
+
+### Console Output
+
+When gap detected: `🔍 Identified 2 gap(s) requiring deeper investigation`  
+When looping back: `🔄 Iteration 1: Reasoner identified 2 gap(s)`  
+When max reached: `⚠ Max reasoning iterations (3) reached`
+         Returns: [{"question": "Which SqlCommand objects correspond to timeouts?", 
+                   "context": "...", "approach": "Use !do to extract references"}]
+```
+
+**Iteration 1 (Deeper Investigation):**
+```
+Workflow: Routes back to "investigate" with new plan
+Investigator: Generates !do commands on timeout objects
+             Extracts SqlCommand references from exception fields
+             Runs !do on SqlCommand addresses
+Reasoner: "Timeout occurred in query: SELECT * FROM LargeTable WHERE..."
+         Sets needs_deeper_investigation = false
+```
+
+See `ITERATIVE_REASONING.md` for complete details.
 
 ## Quality Review System
 
@@ -94,11 +195,25 @@ All agents follow LangGraph's stateless pattern and are organized in the `src/du
 ### Core Agents
 
 - **HypothesisDrivenAgent** (temp: 0.0) - Forms and tests hypotheses, evaluates results
-- **InvestigatorAgent** (temp: 0.1) - Executes focused investigation tasks
+- **InvestigatorAgent** (temp: 0.1) - Executes focused investigation tasks  
 - **ReasonerAgent** (temp: 0.2) - Synthesizes all evidence into conclusions
 - **CriticAgent** (temp: 0.5) - Reviews analysis for quality issues
 - **ReportWriter** (temp: 0.2) - Generates formatted reports
 - **InteractiveChatAgent** (temp: 0.2) - Handles follow-up questions
+
+### Pattern Knowledge System
+
+The **PatternChecker** (`src/dump_debugger/knowledge/`) provides intelligent pattern matching during hypothesis formation:
+
+**Pattern Database**: 19 known debugging patterns in `known_patterns.json`:
+- Application Framework Issues (10): NLog buffers, EF DbContext leaks, SqlConnection deadlocks, SignalR leaks, fire-and-forget tasks, HttpClient anti-pattern, Timer leaks, LOH fragmentation, Finalizer queue, Event handlers
+- General .NET Issues (9): Thread pool starvation, SQL connection leak, Deadlock, Memory leaks (managed/unmanaged), GC thrashing, Exception storm, Handle leak, Async-over-sync blocking
+
+**Matching Modes**:
+1. **Semantic Search** (default): Uses embeddings for similarity matching (OpenAI/Azure/Ollama)
+2. **Keyword Fallback**: Automatic fallback if embeddings unavailable (Azure without deployment, errors)
+
+**Integration**: Pattern hints are automatically included in hypothesis formation prompts, boosting confidence when known patterns detected.
 
 ### Temperature Strategy
 
@@ -163,11 +278,33 @@ Sessions are written under a base sessions directory (default `.sessions/`) and 
 
 After the automated run completes, interactive mode lets you ask follow-up questions.
 
-The agent:
+### Flow
 
-1. Builds context from existing evidence
-2. Decides if that evidence is sufficient
-3. Runs additional debugger commands only when needed
+The **InteractiveChatAgent** follows a 3-step iterative process (max 3 iterations):
+
+1. **Build Context**: Retrieves relevant evidence using semantic search or keyword matching
+2. **Check Sufficiency**: LLM determines if existing evidence can answer the question
+3. **Investigate**: If insufficient, executes new commands and loops back to step 1
+
+### Command Deduplication
+
+- Tracks all attempted commands across iterations in `attempted_commands` set
+- Skips duplicate commands but reuses their cached evidence
+- LLM receives list of already-executed commands to suggest alternatives
+- Prevents infinite loops where same commands are repeatedly suggested
+
+### Atomic Thread Commands
+
+- LLM generates combined commands: `~8e !clrstack` (not separate `~8s` + `!clrstack`)
+- Uses proper WinDbg syntax: `~Ne <command>` runs command on specific thread
+- Eliminates thread context confusion and simplifies deduplication
+- Each command is self-contained with explicit thread context
+
+### Iteration Safeguards
+
+- Maximum 3 investigation rounds per question
+- Stops if no new evidence gathered
+- Detects command repetition and breaks early
 
 ### Critical Thinking in Chat
 

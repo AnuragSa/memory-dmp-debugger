@@ -211,22 +211,42 @@ class DumpHeapAnalyzer(BaseAnalyzer):
         return stats
     
     def _parse_object_list(self, output: str) -> List[Dict[str, Any]]:
-        """Parse object address list."""
+        """Parse object address list.
+        
+        Handles two formats:
+        1. Full format: <address> <MT> <size>
+        2. Short format (-short flag): <address> only
+        """
         objects = []
         lines = output.split('\n')
         
         # Pattern: Address       MT     Size
         # Example: 000001f2a3b4c5d6 00007ff8a1b2c4e0       24
-        pattern = re.compile(r'^([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)')
+        pattern_full = re.compile(r'^([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)')
+        # Short format pattern (-short flag outputs address only)
+        pattern_short = re.compile(r'^([0-9a-fA-F]{8,})$')
         
+        has_full_format = False
         for line in lines:
-            match = pattern.match(line.strip())
+            match = pattern_full.match(line.strip())
             if match:
+                has_full_format = True
                 objects.append({
                     "address": match.group(1),
                     "method_table": match.group(2),
                     "size": int(match.group(3)),
                 })
+        
+        # If no full format matches, try short format
+        if not has_full_format:
+            for line in lines:
+                match = pattern_short.match(line.strip())
+                if match:
+                    objects.append({
+                        "address": match.group(1),
+                        "method_table": "unknown",
+                        "size": 0,
+                    })
         
         return objects
     

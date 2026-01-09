@@ -85,6 +85,9 @@ class AnalysisState(TypedDict):
     reasoner_analysis: str  # Holistic analysis across all evidence
     conclusions: list[str]  # Key conclusions drawn
     confidence_level: Literal["high", "medium", "low"] | None
+    reasoning_iterations: int  # Number of times reasoning has been performed
+    needs_deeper_investigation: bool  # Whether reasoner identified gaps requiring more investigation
+    investigation_requests: list[dict[str, str]]  # Specific investigation requests from reasoner
     
     # Critique phase (NEW - quality review)
     critique_round: int  # Current critique iteration (0-based)
@@ -124,3 +127,5 @@ class ReasonerOutput(TypedDict):
     analysis: str
     conclusions: list[str]
     confidence_level: Literal["high", "medium", "low"]
+    needs_deeper_investigation: bool  # Whether gaps require more investigation
+    investigation_requests: list[dict[str, str]]  # Requests for deeper investigation

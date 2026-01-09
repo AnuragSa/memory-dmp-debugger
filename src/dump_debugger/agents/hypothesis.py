@@ -10,12 +10,9 @@ from dump_debugger.core import DebuggerWrapper
 from dump_debugger.expert_knowledge import (
     COMMAND_SHORTCUTS,
     DATA_MODEL_QUERIES,
-    KNOWN_PATTERNS,
-    get_confirmation_commands,
     get_efficient_commands_for_hypothesis,
-    get_investigation_focus,
-    suggest_pattern_from_symptoms,
 )
+from dump_debugger.knowledge import PatternChecker
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, Evidence, HypothesisTest
 
@@ -52,26 +49,21 @@ class HypothesisDrivenAgent:
         dump_type = state.get('dump_type', 'unknown')
         supports_dx = state.get('supports_dx', False)
         
-        # Check if question matches known patterns
-        symptoms_from_question = [issue]
-        matching_patterns = suggest_pattern_from_symptoms(symptoms_from_question)
+        # Check known patterns from knowledge base
+        from dump_debugger.knowledge import PatternChecker
+        pattern_checker = PatternChecker()
+        pattern_matches = pattern_checker.check_patterns(issue)
         
         pattern_context = ""
-        suggested_pattern = None
-        if matching_patterns:
-            suggested_pattern = matching_patterns[0]  # Use top match
-            pattern_context = "\n\nKNOWN PATTERNS that might match:\n"
-            for pattern_name in matching_patterns[:3]:  # Top 3
-                pattern = KNOWN_PATTERNS[pattern_name]
-                pattern_context += f"\n**{pattern['name']}**\n"
-                pattern_context += f"Typical cause: {pattern['typical_cause']}\n"
-                pattern_context += f"Confirmation needed: {', '.join(pattern['confirmation_commands'][:2])}\n"
+        if pattern_matches:
+            console.print(f"[dim cyan]🎯 Found {len(pattern_matches)} matching known pattern(s)[/dim cyan]")
+            pattern_context = "\n" + pattern_checker.format_pattern_hints(pattern_matches, max_patterns=3)
         
         # Get efficient test commands suggestion
         efficient_commands = get_efficient_commands_for_hypothesis(
             issue, 
             supports_dx, 
-            suggested_pattern
+            pattern_name=None  # Let function infer from hypothesis
         )
         
         command_suggestion = ""
@@ -93,8 +85,18 @@ DATA MODEL AVAILABLE: {"Yes, but use sparingly" if supports_dx else "No"}
 
 Based on the user's question and your expertise, form an initial hypothesis.
 
+CRITICAL: Focus ONLY on APPLICATION issues, NOT debugging infrastructure:
+✅ VALID hypotheses: deadlocks, memory leaks, thread starvation, GC pressure, connection pool exhaustion
+❌ INVALID hypotheses: SOS version mismatches, debugging tool setup, symbol loading issues, CLR DLL problems
+
+The debugging environment is already set up correctly. Do NOT waste time investigating:
+- SOS extension versions or compatibility
+- Symbol paths or loading status
+- CLR debugging DLL (mscordacwks) versions
+- .cordll, .loadby, or other meta-debugging commands
+
 Think like an expert:
-- What's the most likely root cause?
+- What's the most likely APPLICATION root cause?
 - What pattern does this match (deadlock, leak, starvation, etc.)?
 - What would you check first to confirm or reject this hypothesis?
 
@@ -115,6 +117,7 @@ COMMAND GUIDELINES:
 - Only use dx if traditional commands cannot achieve the goal
 - Use commands appropriate for {dump_type}-mode dumps
 - Be specific with commands - use actual command syntax
+- DO NOT use setup commands: .loadby, .cordll, .sympath, .reload, lmm
 
 CRITICAL THREAD ID CLARIFICATION:
 There are THREE different thread identifiers in .NET debugging:
@@ -412,7 +415,19 @@ Return JSON:
             return self._plan_deep_dive(state, current_test)
         
         elif result == 'rejected':
-            # Form new hypothesis
+            # Check if we've hit max hypothesis attempts BEFORE generating new one
+            from dump_debugger.config import settings
+            num_hypotheses = len(state.get('hypothesis_tests', []))
+            
+            if num_hypotheses >= settings.max_hypothesis_attempts:
+                # Hit the limit - don't waste LLM call on new hypothesis
+                console.print(f"\n[bold yellow]❌ Hypothesis REJECTED[/bold yellow]")
+                console.print(f"[yellow]⚠ Max hypothesis attempts ({settings.max_hypothesis_attempts}) reached[/yellow]")
+                console.print("[yellow]Moving to analysis with evidence collected so far...[/yellow]")
+                # Return state unchanged - routing will move to reason phase
+                return {'hypothesis_status': 'rejected'}
+            
+            # Still have attempts left - form new hypothesis
             console.print("\n[bold yellow]❌ Hypothesis REJECTED - Forming new hypothesis[/bold yellow]")
             return self._form_alternative_hypothesis(state, current_test)
         
@@ -615,14 +630,18 @@ Be decisive - if evidence clearly points one way, don't say inconclusive."""
             evidence_parts.insert(0, f"[Last {MAX_EVIDENCE_ITEMS} of {len(evidence_list)} items]")
         evidence_text = "\n".join(evidence_parts)
         
-        # Check if this matches a known pattern
+        # Check if this matches a known pattern using PatternChecker
         pattern_guidance = ""
-        for pattern_name, pattern in KNOWN_PATTERNS.items():
-            if any(keyword in hypothesis.lower() for keyword in pattern_name.split('_')):
-                focus_areas = get_investigation_focus(pattern_name)
-                pattern_guidance = f"\n\nEXPERT FOCUS AREAS for {pattern['name']}:\n"
-                pattern_guidance += "\n".join(f"- {area}" for area in focus_areas)
-                break
+        pattern_checker = PatternChecker()
+        matches = pattern_checker.check_patterns(hypothesis)
+        if matches:
+            top_match = matches[0]
+            pattern = top_match['pattern']  # Extract pattern dict from match
+            pattern_guidance = f"\n\nEXPERT FOCUS AREAS for {pattern['name']}:\n"
+            # investigation_focus is a string in JSON
+            focus = pattern.get('investigation_focus', '')
+            if focus:
+                pattern_guidance += f"- {focus}"
         
         prompt = f"""Hypothesis CONFIRMED: {hypothesis}
 
@@ -699,6 +718,18 @@ Alternative hypotheses to consider:
 
 Based on the evidence, form a NEW hypothesis about the actual root cause.
 
+CRITICAL: Focus ONLY on APPLICATION issues, NOT debugging infrastructure:
+✅ VALID hypotheses: deadlocks, memory leaks, thread starvation, GC pressure, connection pool exhaustion
+❌ INVALID hypotheses: SOS version mismatches, debugging tool setup, symbol loading, CLR DLL problems
+
+The debugging environment is already set up. Do NOT form hypotheses about:
+- SOS extension versions or compatibility  
+- Symbol paths or loading
+- CLR debugging DLL (mscordacwks) versions
+- .cordll, .loadby, or other meta-debugging commands
+
+Focus on what the APPLICATION is doing wrong, not the debugging tools.
+
 Return JSON (same format as initial hypothesis):
 {{
     "hypothesis": "New hypothesis based on evidence",
@@ -714,6 +745,7 @@ COMMAND GUIDELINES:
 - ALWAYS prefer traditional SOS/WinDbg commands: !threads, !threadpool, !dumpheap, !clrstack, !syncblk
 - AVOID dx commands - they frequently fail and have complex syntax
 - Only use dx if traditional commands cannot achieve the goal
+- DO NOT use setup commands: .loadby, .cordll, .sympath, .reload, lmm
 
 Learn from the rejected hypothesis - what did the evidence actually show?"""
         

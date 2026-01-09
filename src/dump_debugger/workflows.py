@@ -258,7 +258,32 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
 
     def reason_node(state: AnalysisState) -> dict:
         """Analyze all evidence and draw conclusions."""
-        return reasoner.reason(state)
+        # Before reasoning, ensure hypothesis test evidence is in the inventory
+        # This is critical when all hypotheses are rejected - otherwise evidence is lost
+        evidence_inventory = state.get('evidence_inventory', {}).copy()
+        
+        for test in state.get('hypothesis_tests', []):
+            hypothesis = test.get('hypothesis', 'Unknown hypothesis')
+            test_evidence = test.get('evidence', [])
+            
+            if test_evidence:
+                # Add hypothesis test evidence to inventory under the hypothesis name
+                task_key = f"Hypothesis Test: {hypothesis}"
+                if task_key not in evidence_inventory:
+                    evidence_inventory[task_key] = []
+                evidence_inventory[task_key].extend(test_evidence)
+        
+        # Update state with merged inventory
+        updated_state = state.copy()
+        updated_state['evidence_inventory'] = evidence_inventory
+        
+        result = reasoner.reason(updated_state)
+        
+        # Ensure the updated inventory persists
+        if 'evidence_inventory' not in result:
+            result['evidence_inventory'] = evidence_inventory
+        
+        return result
     
     def critique_node(state: AnalysisState) -> dict:
         """Review analysis for quality issues."""
@@ -267,6 +292,53 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     def respond_to_critique_node(state: AnalysisState) -> dict:
         """Respond to critic's feedback by collecting missing evidence and re-analyzing."""
         critique_result = state.get('critique_result', {})
+        
+        # Handle both old and new critique result formats
+        issues = critique_result.get('issues_found', [])
+        if isinstance(issues, bool):
+            # Old format where issues_found is a boolean
+            if issues:
+                console.print(f"\n[bold cyan]🔧 Addressing Critique Issues[/bold cyan]")
+            else:
+                console.print(f"\n[bold cyan]🔧 Re-analyzing[/bold cyan]")
+        else:
+            # New format where issues_found is a list
+            console.print(f"\n[bold cyan]🔧 Addressing {len(issues)} Critique Issues[/bold cyan]")
+        
+        # TODO: Implement evidence collection based on critique
+        # For now, just re-analyze with same evidence
+        return reasoner.reason(state)
+    
+    def prepare_deeper_investigation_node(state: AnalysisState) -> dict:
+        """Prepare state for deeper investigation based on reasoner's gap requests."""
+        investigation_requests = state.get('investigation_requests', [])
+        
+        console.print(f"[dim]Preparing investigation plan from {len(investigation_requests)} gap request(s)[/dim]")
+        
+        # Convert investigation requests to investigation plan
+        investigation_plan = []
+        for req in investigation_requests:
+            question = req.get('question', '')
+            context = req.get('context', '')
+            approach = req.get('approach', '')
+            
+            # Add detailed task to investigation plan
+            task_description = f"{question}"
+            if context:
+                task_description += f" Context: {context}"
+            if approach:
+                task_description += f" Suggested approach: {approach}"
+            
+            console.print(f"[dim]  → {question[:80]}...[/dim]" if len(question) > 80 else f"[dim]  → {question}[/dim]")
+            investigation_plan.append(task_description)
+        
+        # Return state updates
+        return {
+            'investigation_plan': investigation_plan,
+            'current_task_index': 0,
+            'current_task': investigation_plan[0] if investigation_plan else '',
+            'investigation_results': []  # Clear previous results for new iteration
+        }
         
         if not critique_result.get('issues_found', False):
             # No issues - proceed to report
@@ -448,6 +520,7 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     workflow.add_node("decide", decide_next_node)
     workflow.add_node("investigate", investigate_node)
     workflow.add_node("reason", reason_node)
+    workflow.add_node("prepare_deeper_investigation", prepare_deeper_investigation_node)  # NEW: Bridge node for iterative reasoning
     workflow.add_node("critique", critique_node)
     workflow.add_node("respond", respond_to_critique_node)
     workflow.add_node("report", report_node)
@@ -475,13 +548,8 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             console.print("[yellow]⚠ Max iterations reached[/yellow]")
             return "reason"
         
-        # Check maximum hypothesis attempts
-        num_hypotheses = len(state.get('hypothesis_tests', []))
-        if num_hypotheses >= settings.max_hypothesis_attempts:
-            console.print(f"[yellow]⚠ Max hypothesis attempts ({settings.max_hypothesis_attempts}) reached[/yellow]")
-            console.print("[yellow]Moving to analysis with evidence collected so far...[/yellow]")
-            # Go to reasoning regardless - user might learn something from collected evidence
-            return "reason"
+        # Note: Max hypothesis attempts check is now done in decide_next_step()
+        # before generating new hypothesis to avoid wasting LLM calls
         
         if status == 'confirmed':
             # Hypothesis confirmed - start deep investigation
@@ -489,9 +557,14 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         elif status == 'testing':
             # New hypothesis formed - test it
             return "test"
+        elif status == 'rejected':
+            # Hypothesis rejected and hit max attempts (checked in decide_next_step)
+            # Move to reasoning phase
+            return "reason"
         else:
             # Shouldn't happen, but safety fallback
-            return "reason"
+            console.print(f"[yellow]⚠ Unexpected hypothesis status: {status}, defaulting to test[/yellow]")
+            return "test"
     
     def route_after_investigate(state: AnalysisState) -> str:
         """Route after investigation: next task or reasoning phase."""
@@ -590,7 +663,53 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     
     # Routing after reasoning
     def route_after_reason(state: AnalysisState) -> str:
-        """Route after reasoning: critique if hypothesis confirmed, else skip to report."""
+        """Route after reasoning: check confidence, gaps, then route appropriately."""
+        
+        # OPTIMIZATION: Check confidence level for early termination
+        confidence_level = state.get('confidence_level', 'medium')
+        reasoning_iterations = state.get('reasoning_iterations', 0)
+        
+        # Check for expert assessment consensus
+        evidence_inventory = state.get('evidence_inventory', {})
+        high_confidence_assessments = 0
+        total_assessments = 0
+        
+        for task_evidence in evidence_inventory.values():
+            for evidence in task_evidence:
+                assessment = evidence.get('expert_assessment')
+                if assessment:
+                    total_assessments += 1
+                    if assessment.get('confidence', 0) > 0.8:
+                        high_confidence_assessments += 1
+        
+        # Calculate overall confidence
+        expert_confidence_ratio = high_confidence_assessments / total_assessments if total_assessments > 0 else 0
+        
+        # EARLY TERMINATION: High confidence + sufficient evidence = skip iterative reasoning
+        if confidence_level == 'high' and expert_confidence_ratio > 0.7 and reasoning_iterations == 0:
+            console.print(f"[green]✓ HIGH confidence analysis with {expert_confidence_ratio:.0%} expert consensus[/green]")
+            console.print(f"[green]  Skipping iterative reasoning - conclusions are decisive and well-supported[/green]")
+            # Go straight to critique for quality check
+            return "critique"
+        
+        # Check if reasoner identified gaps requiring deeper investigation
+        needs_deeper = state.get('needs_deeper_investigation', False)
+        investigation_requests = state.get('investigation_requests', [])
+        max_iterations = 2  # Reduced from 3 - be more decisive
+        
+        # CRITICAL: Always collect missing evidence when gaps are identified
+        # Confidence checks only apply when we have all the evidence we need
+        if needs_deeper and investigation_requests and reasoning_iterations < max_iterations:
+            console.print(f"[cyan]🔄 Iteration {reasoning_iterations + 1}: Reasoner identified {len(investigation_requests)} gap(s)[/cyan]")
+            console.print(f"[cyan]   Current confidence: {confidence_level.upper()}[/cyan]")
+            console.print(f"[cyan]   Collecting missing evidence to enable definitive conclusions[/cyan]")
+            return "prepare_deeper_investigation"
+        
+        if reasoning_iterations >= max_iterations:
+            console.print(f"[yellow]⚠ Max reasoning iterations ({max_iterations}) reached[/yellow]")
+            console.print(f"[yellow]   Proceeding to critique phase with current evidence[/yellow]")
+        
+        # Normal flow: check hypothesis status
         hypothesis_status = state.get('hypothesis_status', 'testing')
         
         # Only critique if we have a confirmed hypothesis
@@ -608,15 +727,51 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             return "chat"
         return "end"
     
+    # Routing after respond (re-analysis after critique)
+    def route_after_respond(state: AnalysisState) -> str:
+        """Route after responding to critique: check confidence and gaps before continuing."""
+        
+        # OPTIMIZATION: Check if re-analysis achieved high confidence
+        confidence_level = state.get('confidence_level', 'medium')
+        reasoning_iterations = state.get('reasoning_iterations', 0)
+        
+        # If we now have high confidence, skip further iteration
+        if confidence_level == 'high':
+            console.print(f"[green]✓ Re-analysis achieved HIGH confidence - proceeding to final critique[/green]")
+            return "critique"
+        
+        # Check if the re-analysis identified new gaps requiring deeper investigation
+        needs_deeper = state.get('needs_deeper_investigation', False)
+        investigation_requests = state.get('investigation_requests', [])
+        max_iterations = 2  # Reduced - be more decisive
+        
+        if needs_deeper and investigation_requests and reasoning_iterations < max_iterations:
+            # Only pursue if confidence is still low
+            if confidence_level == 'low':
+                console.print(f"[cyan]🔄 Re-analysis identified {len(investigation_requests)} gap(s) with LOW confidence[/cyan]")
+                console.print(f"[cyan]   Routing to deeper investigation for critical correlation data[/cyan]")
+                return "prepare_deeper_investigation"
+            else:
+                console.print(f"[cyan]📊 Confidence level {confidence_level.upper()} - gaps noted but sufficient for conclusions[/cyan]")
+                return "critique"
+        
+        # No gaps or max iterations reached - continue with critique round 2
+        return "critique"
+    
     # Final steps - add critique loop
     workflow.add_conditional_edges(
         "reason",
         route_after_reason,
         {
+            "prepare_deeper_investigation": "prepare_deeper_investigation",  # Route to bridge node
             "critique": "critique",
             "report": "report"
         }
     )
+    
+    # Bridge node to set up deeper investigation
+    workflow.add_edge("prepare_deeper_investigation", "investigate")
+    
     workflow.add_conditional_edges(
         "critique",
         route_after_critique,
@@ -625,7 +780,17 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             "report": "report"
         }
     )
-    workflow.add_edge("respond", "critique")
+    
+    # After respond, check if re-analysis identified gaps
+    workflow.add_conditional_edges(
+        "respond",
+        route_after_respond,
+        {
+            "prepare_deeper_investigation": "prepare_deeper_investigation",
+            "critique": "critique"
+        }
+    )
+    
     workflow.add_conditional_edges(
         "report",
         route_after_report,
@@ -653,6 +818,7 @@ def run_analysis(
     log_to_file: bool = True,
     log_output_path: Path | None = None,
     interactive: bool = False,
+
 ) -> str:
     """Run expert-level hypothesis-driven memory dump analysis.
     
@@ -663,6 +829,7 @@ def run_analysis(
         log_to_file: Whether to log output to session.log
         log_output_path: Custom log file path (relative to session dir or absolute)
         interactive: Whether to enable interactive chat mode after analysis
+
         
     Returns:
         Final analysis report

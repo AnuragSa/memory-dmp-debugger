@@ -12,6 +12,7 @@ from dump_debugger.core import DebuggerWrapper
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, ChatMessage, Evidence
 from dump_debugger.utils import detect_placeholders, resolve_command_placeholders
+from dump_debugger.utils.command_healer import CommandHealer
 
 console = Console()
 
@@ -28,6 +29,7 @@ class InteractiveChatAgent:
     
     def __init__(self, debugger: DebuggerWrapper):
         self.debugger = debugger
+        self.healer = CommandHealer()
         self.llm = get_llm(temperature=0.2)
         
         # Initialize evidence retriever if session available
@@ -70,6 +72,7 @@ class InteractiveChatAgent:
         max_iterations = 3
         all_commands_executed = []
         all_new_evidence = []
+        attempted_commands = set()  # Track all commands we've tried to prevent duplicates
         
         for iteration in range(max_iterations):
             # Step 1: Build context from existing evidence
@@ -78,6 +81,9 @@ class InteractiveChatAgent:
             # Add previously gathered evidence to context
             if all_new_evidence:
                 context['relevant_evidence'].extend(all_new_evidence)
+            
+            # Add attempted commands to context so LLM knows what we've tried
+            context['attempted_commands'] = list(attempted_commands)
             
             # Step 2: Check if current evidence is sufficient
             needs_investigation, reasoning = self._check_existing_evidence(
@@ -91,15 +97,20 @@ class InteractiveChatAgent:
             # Step 3: Execute investigative commands
             console.print(f"[yellow]🔍 Investigation round {iteration + 1}/{max_iterations}: {reasoning}[/yellow]")
             commands_executed, new_evidence = self._execute_investigative_commands(
-                user_question, context, state
+                user_question, context, state, attempted_commands
             )
             
             all_commands_executed.extend(commands_executed)
             all_new_evidence.extend(new_evidence)
             
-            # If no new evidence was gathered, stop iterating
+            # If no new evidence was gathered OR we're re-running same commands, stop
             if not new_evidence:
                 console.print("[yellow]⚠ No new evidence gathered, stopping investigation[/yellow]")
+                break
+            
+            # Check if we're stuck (same commands being suggested repeatedly)
+            if iteration > 0 and len(set(commands_executed) & set(all_commands_executed[:-len(commands_executed)])) > 0:
+                console.print("[yellow]⚠ Detected command repetition, stopping to avoid loop[/yellow]")
                 break
         
         # Step 4: Formulate the answer with all gathered evidence
@@ -265,6 +276,15 @@ class InteractiveChatAgent:
                 if finding and not finding.startswith('Data for:'):
                     evidence_summary += f"   Finding: {finding[:1000]}\n"
         
+        # Add information about already attempted commands
+        attempted_commands = context.get('attempted_commands', [])
+        if attempted_commands:
+            evidence_summary += "\n## Commands Already Executed\n"
+            evidence_summary += "The following commands have already been run (do NOT suggest these again):\n"
+            for cmd in attempted_commands:
+                evidence_summary += f"- {cmd}\n"
+            evidence_summary += "\n"
+        
         prompt = f"""You are analyzing a Windows memory dump. A user has asked a follow-up question.
 
 USER'S ORIGINAL ISSUE: {context['issue_description']}
@@ -298,7 +318,8 @@ Respond in JSON format:
 CRITICAL - If suggesting commands:
 - Use ONLY pure WinDbg commands - NO PowerShell syntax
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_
-- VALID: '!threads', '~*e !clrstack', '!dumpheap -stat', '!syncblk'"""
+- THREAD-SPECIFIC: Combine thread switch with command (e.g., '~8e !clrstack', NOT '~8s' then '!clrstack')
+- VALID: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk'"""
 
         messages = [
             SystemMessage(content="You are an expert Windows crash dump analyst."),
@@ -321,7 +342,7 @@ CRITICAL - If suggesting commands:
         return True, "Unable to determine if evidence is sufficient"
     
     def _execute_investigative_commands(
-        self, question: str, context: dict[str, Any], state: AnalysisState
+        self, question: str, context: dict[str, Any], state: AnalysisState, attempted_commands: set
     ) -> tuple[list[str], list[Evidence]]:
         """Execute debugger commands to gather information for the question.
         
@@ -329,6 +350,7 @@ CRITICAL - If suggesting commands:
             question: User's question
             context: Built context
             state: Current analysis state
+            attempted_commands: Set of commands already attempted (to avoid duplicates)
             
         Returns:
             Tuple of (commands_executed, new_evidence)
@@ -373,6 +395,13 @@ CRITICAL - If suggesting commands:
         previous_evidence.extend(new_evidence)
         
         for command in suggested_commands[:max_commands_per_iteration]:
+            # Skip if we've already attempted this exact command
+            if command in attempted_commands:
+                console.print(f"  [dim yellow]⊘ Skipping already attempted:[/dim yellow] {command}")
+                # Note: Evidence from previous execution is already in context['relevant_evidence']
+                # and will be available for analysis
+                continue
+            
             # Validate command syntax - reject PowerShell constructs
             invalid_syntax = ['| foreach', '| findstr', '| grep', '| where', '| select', '$_']
             if any(invalid in command.lower() for invalid in invalid_syntax):
@@ -396,12 +425,18 @@ CRITICAL - If suggesting commands:
             
             console.print(f"  [dim]Running:[/dim] {command}")
             
-            # Use execute_command_with_analysis to get summaries for large outputs
-            result = self.debugger.execute_command_with_analysis(
+            # Execute with automatic healing
+            result = self._execute_with_healing(
                 command=command,
-                intent=f"Investigating: {question}"
+                question=question,
+                context={
+                    'previous_evidence': previous_evidence
+                }
             )
             commands_executed.append(command)
+            
+            # Mark this command as attempted to prevent duplicates
+            attempted_commands.add(command)
             
             if result['success'] and result['output']:
                 # For evidence size tracking, use the output size (might be summary for large outputs)
@@ -484,8 +519,9 @@ Generate 1-5 specific commands that will help answer the question.
 CRITICAL COMMAND SYNTAX RULES:
 - Use ONLY pure WinDbg/CDB commands - NEVER PowerShell syntax
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_, any PowerShell operators
-- INVALID EXAMPLES: '~*e !clrstack | findstr Thread', '!dumpheap | foreach', '!threads | grep'
-- VALID EXAMPLES: '!threads', '~*e !clrstack', '!dumpheap -stat', '!syncblk', '!do <address>'
+- THREAD-SPECIFIC COMMANDS: Always combine thread switch with command (e.g., '~8e !clrstack', NOT '~8s' then '!clrstack')
+- INVALID EXAMPLES: '~*e !clrstack | findstr Thread', '!dumpheap | foreach', '~8s' followed by '!clrstack'
+- VALID EXAMPLES: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk'
 - For filtering: Use WinDbg native commands only (e.g., ~*e applies to all threads)
 - For batch: Suggest single representative commands, not loops
 
@@ -824,3 +860,67 @@ Provide your answer now:"""
                         continue
         
         return None
+    
+    def _execute_with_healing(self, command: str, question: str, context: dict) -> dict:
+        """Execute command with automatic healing on failure.
+        
+        Args:
+            command: Command to execute
+            question: User's question
+            context: Execution context with previous evidence
+            
+        Returns:
+            Command execution result dict
+        """
+        max_heal_attempts = 2
+        attempt = 0
+        current_command = command
+        
+        while attempt <= max_heal_attempts:
+            # Execute the command
+            result = self.debugger.execute_command_with_analysis(
+                command=current_command,
+                intent=f"Investigating: {question}"
+            )
+            
+            # Check if command failed
+            if isinstance(result, dict):
+                output = result.get('output', '')
+                success = result.get('success', True)
+                
+                # Detect failure indicators in output
+                failed = (
+                    not success or
+                    output.startswith('Error:') or
+                    'Unable to bind' in output or
+                    'Invalid object' in output or
+                    'bad object' in output or
+                    'not found' in output or
+                    'Syntax error' in output
+                )
+                
+                if failed and attempt < max_heal_attempts:
+                    # Attempt to heal the command
+                    healed_command = self.healer.heal_command(
+                        current_command, 
+                        output,
+                        context
+                    )
+                    
+                    if healed_command:
+                        attempt += 1
+                        current_command = healed_command
+                        console.print(f"  [yellow]⚠ Retry {attempt}/{max_heal_attempts} with healed command[/yellow]")
+                        continue  # Retry with healed command
+                    else:
+                        # Can't heal, return failure
+                        return result
+                else:
+                    # Success or max attempts reached
+                    return result
+            else:
+                # Non-dict result, return as-is
+                return result
+        
+        # Max attempts reached, return last result
+        return result

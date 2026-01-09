@@ -1,15 +1,10 @@
-"""Expert knowledge base - patterns, heuristics, and domain knowledge for memory dump debugging."""
+"""Expert knowledge base - heuristics, command shortcuts, and domain knowledge for memory dump debugging.
+
+NOTE: Known failure patterns have been moved to src/dump_debugger/knowledge/known_patterns.json
+Use PatternChecker from dump_debugger.knowledge to access patterns.
+"""
 
 from typing import TypedDict
-
-
-class Pattern(TypedDict):
-    """A known failure pattern that experts recognize."""
-    name: str
-    symptoms: list[str]
-    confirmation_commands: list[str]
-    typical_cause: str
-    investigation_focus: list[str]
 
 
 class ExpertHeuristic(TypedDict):
@@ -19,211 +14,6 @@ class ExpertHeuristic(TypedDict):
     warning_threshold: str
     critical_threshold: str
     interpretation: str
-
-
-# ============================================================================
-# KNOWN FAILURE PATTERNS
-# ============================================================================
-
-KNOWN_PATTERNS: dict[str, Pattern] = {
-    "thread_pool_starvation": {
-        "name": "Thread Pool Starvation",
-        "symptoms": [
-            "High thread count (>50 for typical app)",
-            "Most threads in WaitForSingleObject or similar wait states",
-            "ThreadPool queue has pending work items",
-            "Application appears hung or slow"
-        ],
-        "confirmation_commands": [
-            "~*e !clrstack",  # All thread stacks
-            "!threadpool",  # ThreadPool statistics
-            "!syncblk"  # Check for blocking
-        ],
-        "typical_cause": "All ThreadPool threads are blocked waiting, preventing new work from being processed",
-        "investigation_focus": [
-            "What are threads waiting on?",
-            "Are there deadlocks?",
-            "Is there a long-running synchronous operation blocking threads?",
-            "Check for database connection exhaustion"
-        ]
-    },
-    
-    "sql_connection_leak": {
-        "name": "SQL Connection Leak",
-        "symptoms": [
-            "Many SqlConnection or DbConnection objects on heap",
-            "Connection timeout exceptions",
-            "Heap growing over time",
-            "Connection pool exhausted errors"
-        ],
-        "confirmation_commands": [
-            "!dumpheap -type SqlConnection -stat",
-            "!dumpheap -type DbConnection -stat",
-            "!finalizequeue"  # Check for undisposed connections
-        ],
-        "typical_cause": "SqlConnection objects not being properly disposed, exhausting connection pool",
-        "investigation_focus": [
-            "How many connection objects exist?",
-            "Are they in finalizer queue (not disposed)?",
-            "What's the connection pool limit?",
-            "Which code paths are leaking connections?"
-        ]
-    },
-    
-    "deadlock": {
-        "name": "Deadlock",
-        "symptoms": [
-            "Application completely hung",
-            "Multiple threads waiting on locks",
-            "Circular wait dependencies",
-            "CPU usage near zero"
-        ],
-        "confirmation_commands": [
-            "!syncblk",
-            "~*e !clrstack",
-            "!locks"  # For kernel-mode dumps
-        ],
-        "typical_cause": "Circular dependency where Thread A waits for lock held by Thread B, and Thread B waits for lock held by Thread A",
-        "investigation_focus": [
-            "Which threads are involved?",
-            "What locks are they waiting on?",
-            "What's the circular dependency chain?",
-            "What code caused the deadlock?"
-        ]
-    },
-    
-    "memory_leak_managed": {
-        "name": "Managed Memory Leak",
-        "symptoms": [
-            "Heap growing continuously",
-            "Large Gen2 heap size",
-            "High number of specific object types",
-            "OutOfMemoryException"
-        ],
-        "confirmation_commands": [
-            "!dumpheap -stat",
-            "!gcheapstat",
-            "!finalizerqueue"
-        ],
-        "typical_cause": "Objects being kept alive unintentionally (event handlers, static references, caches)",
-        "investigation_focus": [
-            "Which object types are accumulating?",
-            "What's holding references to these objects?",
-            "Are there event handler leaks?",
-            "Is there an unbounded cache?"
-        ]
-    },
-    
-    "memory_leak_unmanaged": {
-        "name": "Unmanaged Memory Leak",
-        "symptoms": [
-            "Process memory high but managed heap small",
-            "Large 'Unknown' regions in !address -summary",
-            "Virtual size >> working set",
-            "Native memory allocations not freed"
-        ],
-        "confirmation_commands": [
-            "!address -summary",
-            "!heap -s",  # For user-mode dumps
-            "!eeheap -gc"  # Compare managed vs total
-        ],
-        "typical_cause": "Unmanaged allocations (COM objects, handles, native DLLs) not being freed",
-        "investigation_focus": [
-            "What's consuming unmanaged memory?",
-            "Check for handle leaks (!handle)",
-            "Check for large memory-mapped files",
-            "Are native DLLs leaking?"
-        ]
-    },
-    
-    "high_cpu_gc": {
-        "name": "High CPU from GC Thrashing",
-        "symptoms": [
-            "High CPU usage",
-            "Frequent Gen2 collections",
-            "GC time percentage high (>10%)",
-            "Application slow despite available memory"
-        ],
-        "confirmation_commands": [
-            "!gcheapstat",
-            "!finalizequeue",
-            "!dumpheap -stat"
-        ],
-        "typical_cause": "GC spending too much time collecting because heap is near limit or too much garbage generated",
-        "investigation_focus": [
-            "How often is GC running?",
-            "Are there many objects in finalizer queue?",
-            "Is heap fragmented?",
-            "Are large objects being allocated frequently?"
-        ]
-    },
-    
-    "exception_storm": {
-        "name": "Exception Storm",
-        "symptoms": [
-            "Many exception objects on heap",
-            "Multiple threads with exception in stack",
-            "High CPU with lots of exception handling",
-            "Application slow or unresponsive"
-        ],
-        "confirmation_commands": [
-            "!dumpheap -type Exception -stat",
-            "~*e !pe",  # Print exception on all threads
-            "!analyze -v"  # Automatic analysis
-        ],
-        "typical_cause": "Code throwing and catching exceptions in tight loop, or unhandled exceptions causing retries",
-        "investigation_focus": [
-            "What exception types are being thrown?",
-            "Which code is throwing them?",
-            "Is this expected (flow control) or bug?",
-            "Are exceptions being swallowed and retried?"
-        ]
-    },
-    
-    "handle_leak": {
-        "name": "Handle Leak",
-        "symptoms": [
-            "High handle count in Task Manager",
-            "Handle-related errors (too many files open, etc.)",
-            "Many File/Mutex/Event objects on heap",
-            "Process slow or failing operations"
-        ],
-        "confirmation_commands": [
-            "!handle",  # User-mode only
-            "!dumpheap -type FileStream -stat",
-            "!dumpheap -type SafeHandle -stat"
-        ],
-        "typical_cause": "File streams, synchronization primitives, or COM objects not being disposed",
-        "investigation_focus": [
-            "What types of handles are leaking?",
-            "Are FileStreams being disposed?",
-            "Are mutex/event handles being closed?",
-            "Check finalizer queue for undisposed objects"
-        ]
-    },
-    
-    "async_blocking": {
-        "name": "Async over Sync Blocking",
-        "symptoms": [
-            "Thread pool starvation",
-            "Many threads blocked on Task.Wait() or .Result",
-            "Application hung despite async code",
-            "Potential deadlock in async code"
-        ],
-        "confirmation_commands": [
-            "~*e !clrstack",
-            "!dumpheap -type Task -stat",
-            "!syncblk"
-        ],
-        "typical_cause": "Blocking on async operations with .Wait() or .Result, causing thread pool starvation",
-        "investigation_focus": [
-            "Which threads are blocked on Task.Wait?",
-            "Is there a sync-over-async pattern?",
-            "Are there deadlocks from ConfigureAwait issues?",
-            "Check for SynchronizationContext deadlocks"
-        ]
-    }
-}
 
 
 # ============================================================================
@@ -444,15 +234,11 @@ def get_efficient_commands_for_hypothesis(
     Args:
         hypothesis: The hypothesis to test
         supports_dx: Whether data model commands are available (ignored - always use traditional)
-        pattern_name: Optional pattern name for specialized tests
+        pattern_name: Optional pattern name (deprecated - kept for backward compatibility)
         
     Returns:
         List of commands to execute
     """
-    # Always use traditional commands - dx has high failure rate
-    if pattern_name and pattern_name in KNOWN_PATTERNS:
-        return KNOWN_PATTERNS[pattern_name]['confirmation_commands']
-    
     # Infer commands from hypothesis keywords
     commands = []
     hypothesis_lower = hypothesis.lower()
@@ -503,60 +289,51 @@ def get_efficient_commands_for_hypothesis(
 
 
 # ============================================================================
-# PATTERN MATCHING - Quick pattern recognition
+# PATTERN MATCHING - Deprecated (use PatternChecker from knowledge module)
 # ============================================================================
 
 def suggest_pattern_from_symptoms(symptoms: list[str]) -> list[str]:
     """Suggest patterns based on observed symptoms.
     
+    DEPRECATED: Use PatternChecker from dump_debugger.knowledge instead.
+    This function is kept for backward compatibility only.
+    
     Args:
         symptoms: List of symptoms observed
         
     Returns:
-        List of pattern names that match the symptoms
+        Empty list (patterns moved to JSON-based system)
     """
-    matching_patterns = []
-    
-    for pattern_key, pattern in KNOWN_PATTERNS.items():
-        # Simple keyword matching (could be enhanced with LLM)
-        symptom_keywords = set(' '.join(pattern['symptoms']).lower().split())
-        observed_keywords = set(' '.join(symptoms).lower().split())
-        
-        # If significant overlap, suggest this pattern
-        overlap = symptom_keywords & observed_keywords
-        if len(overlap) >= 3:  # At least 3 keyword matches
-            matching_patterns.append(pattern_key)
-    
-    return matching_patterns
+    return []
 
 
 def get_confirmation_commands(pattern_name: str) -> list[str]:
     """Get commands to confirm a suspected pattern.
     
+    DEPRECATED: Patterns moved to knowledge/known_patterns.json.
+    Use PatternChecker from dump_debugger.knowledge instead.
+    
     Args:
         pattern_name: Name of the pattern to confirm
         
     Returns:
-        List of debugger commands to run
+        Empty list (use PatternChecker instead)
     """
-    pattern = KNOWN_PATTERNS.get(pattern_name)
-    if pattern:
-        return pattern['confirmation_commands']
     return []
 
 
 def get_investigation_focus(pattern_name: str) -> list[str]:
     """Get investigation focus areas for a confirmed pattern.
     
+    DEPRECATED: Patterns moved to knowledge/known_patterns.json.
+    Use PatternChecker from dump_debugger.knowledge instead.
+    
     Args:
         pattern_name: Name of the confirmed pattern
         
     Returns:
-        List of questions/areas to investigate
+        Empty list (use PatternChecker instead)
     """
-    pattern = KNOWN_PATTERNS.get(pattern_name)
-    if pattern:
-        return pattern['investigation_focus']
     return []
 
 
