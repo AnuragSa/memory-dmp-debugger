@@ -1,14 +1,27 @@
 """LLM provider utilities for different API providers."""
 
+import time
+from pathlib import Path
 from typing import Any
 
 from anthropic import AnthropicFoundry
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_core.embeddings import Embeddings
+from langchain_core.messages import BaseMessage
 from langchain_openai import AzureChatOpenAI, ChatOpenAI, OpenAIEmbeddings, AzureOpenAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
+from pydantic import PrivateAttr
 from rich.console import Console
+from rich.panel import Panel
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+import logging
 
 try:
     from azure.ai.inference import ChatCompletionsClient
@@ -20,6 +33,7 @@ except ImportError:
     AZURE_AI_AVAILABLE = False
 
 from dump_debugger.config import settings
+from dump_debugger.security.redactor import DataRedactor, load_custom_patterns
 from dump_debugger.token_tracker import create_callback
 
 console = Console()
@@ -27,20 +41,38 @@ console = Console()
 # LLM instance cache to avoid creating duplicates
 _llm_cache: dict[str, BaseChatModel] = {}
 
+# Global redactor instance (initialized on first use)
+_redactor: DataRedactor | None = None
 
-def get_llm(temperature: float = 0.0) -> BaseChatModel:
+
+def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChatModel:
     """Get the configured LLM instance.
     
     Args:
         temperature: Model temperature (0.0 for deterministic, higher for creative)
+        session_id: Session ID for audit logging (optional)
         
     Returns:
         Configured LLM instance (cached to avoid duplicates)
         
     Raises:
-        ValueError: If provider is not configured or invalid
+        ValueError: If provider is not configured or invalid, or if local-only mode requires Ollama
     """
     provider = settings.llm_provider.lower()
+    
+    # SECURITY: Enforce local-only mode
+    if settings.local_only_mode:
+        if provider != "ollama":
+            raise ValueError(
+                "🔒 LOCAL-ONLY MODE is enabled but cloud LLM provider is configured.\n\n"
+                "To use local-only mode, configure Ollama in your .env file:\n"
+                "  USE_LOCAL_LLM=true\n"
+                "  LOCAL_LLM_MODEL=qwen2.5-coder:7b\n"
+                "  LOCAL_LLM_BASE_URL=http://localhost:11434\n\n"
+                "Then set LLM_PROVIDER=ollama or remove the LOCAL_ONLY_MODE setting.\n\n"
+                "Install Ollama: https://ollama.com/download"
+            )
+        console.print("[green]🔒 LOCAL-ONLY MODE: All processing stays on your machine[/green]")
     
     # Check cache first (key includes provider, model, and temperature)
     cache_key = f"{provider}:{temperature}"
@@ -79,6 +111,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             request_timeout=60,
             callbacks=callbacks,
         )
+        # Wrap with redaction for cloud provider
+        llm = _wrap_with_redaction(llm, "openai", session_id)
         _llm_cache[cache_key] = llm
         return llm
     
@@ -94,6 +128,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
             timeout=60,
             callbacks=callbacks,
         )
+        # Wrap with redaction for cloud provider
+        llm = _wrap_with_redaction(llm, "anthropic", session_id)
         _llm_cache[cache_key] = llm
         return llm
     
@@ -118,6 +154,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 timeout=60,
                 callbacks=callbacks,
             )
+            # Wrap with redaction for cloud provider
+            llm = _wrap_with_redaction(llm, "azure-foundry", session_id)
             _llm_cache[cache_key] = llm
             return llm
         else:
@@ -132,6 +170,8 @@ def get_llm(temperature: float = 0.0) -> BaseChatModel:
                 request_timeout=60,
                 callbacks=callbacks,
             )
+            # Wrap with redaction for cloud provider
+            llm = _wrap_with_redaction(llm, "azure-openai", session_id)
             _llm_cache[cache_key] = llm
             return llm
     
@@ -168,9 +208,12 @@ def get_structured_llm(temperature: float = 0.0) -> BaseChatModel:
     """
     llm = get_llm(temperature)
     
+    # Unwrap if it's a RedactionLLMWrapper to check the underlying LLM type
+    underlying_llm = llm.llm if isinstance(llm, RedactionLLMWrapper) else llm
+    
     # For OpenAI and Azure OpenAI, we can enable JSON mode
-    if isinstance(llm, (ChatOpenAI, AzureChatOpenAI)):
-        llm.model_kwargs = {"response_format": {"type": "json_object"}}
+    if isinstance(underlying_llm, (ChatOpenAI, AzureChatOpenAI)):
+        underlying_llm.model_kwargs = {"response_format": {"type": "json_object"}}
     # For Claude/Anthropic, JSON mode is not supported via a parameter
     # Instead, the prompts must explicitly request JSON in <JSON></JSON> tags or similar
     # and we rely on the prompt engineering
@@ -223,4 +266,192 @@ def get_embeddings() -> Embeddings:
     
     else:
         raise ValueError(f"Embeddings not supported for provider: {provider}")
+
+
+class RedactionLLMWrapper(BaseChatModel):
+    """Wrapper that applies data redaction before sending to cloud LLMs.
+    
+    This wrapper intercepts all LLM calls, redacts sensitive data, displays
+    warnings about cloud usage, and optionally logs redactions for audit.
+    """
+    
+    # Pydantic fields (public)
+    llm: BaseChatModel
+    provider_name: str
+    session_id: str | None = None
+    
+    # Private state variables (not part of Pydantic model)
+    _shown_warning: bool = PrivateAttr(default=False)
+    _total_redactions: int = PrivateAttr(default=0)
+    
+    class Config:
+        """Pydantic configuration."""
+        arbitrary_types_allowed = True
+    
+    def model_post_init(self, __context: Any) -> None:
+        """Initialize private attributes after model creation."""
+        super().model_post_init(__context)
+        self._shown_warning = False
+        self._total_redactions = 0
+    
+    def _get_redactor(self) -> DataRedactor:
+        """Get or create the global redactor instance."""
+        global _redactor
+        
+        # Always recreate if show_values changed (for debugging session)
+        # or if redactor doesn't exist yet
+        should_recreate = (
+            _redactor is None or 
+            (hasattr(_redactor, 'show_values') and _redactor.show_values != settings.show_redacted_values)
+        )
+        
+        if should_recreate:
+            # Load custom patterns
+            custom_patterns_path = settings.redaction_patterns_path
+            custom_patterns = load_custom_patterns(custom_patterns_path)
+            
+            # Setup audit logging if enabled AND we have a session_id
+            audit_log_path = None
+            enable_audit = False
+            # Use session_id from wrapper or fall back to settings.current_session_id
+            session_id_to_use = self.session_id or settings.current_session_id
+            if settings.enable_redaction_audit and session_id_to_use:
+                audit_log_path = Path(settings.sessions_base_dir) / session_id_to_use / "redaction_audit.log"
+                enable_audit = True
+            
+            _redactor = DataRedactor(
+                custom_patterns=custom_patterns,
+                enable_audit=enable_audit,
+                audit_log_path=audit_log_path,
+                redaction_placeholder="[REDACTED]",
+                show_values=settings.show_redacted_values
+            )
+        return _redactor
+    
+    def _redact_messages(self, messages: list[BaseMessage] | str) -> tuple[list[BaseMessage] | str, int]:
+        """Redact sensitive data from messages.
+        
+        Args:
+            messages: List of messages to redact or a string
+            
+        Returns:
+            Tuple of (redacted messages/string, redaction count)
+        """
+        redactor = self._get_redactor()
+        
+        # Handle string input (some LangChain code calls invoke with strings)
+        if isinstance(messages, str):
+            redacted_text, redaction_count = redactor.redact_text(
+                messages,
+                context=f"{self.provider_name}_call"
+            )
+            self._total_redactions += redaction_count
+            return redacted_text, redaction_count
+        
+        # Handle list of messages
+        redacted_messages = []
+        total_redactions = 0
+        
+        for msg in messages:
+            content = msg.content
+            if isinstance(content, str):
+                redacted_content, redaction_count = redactor.redact_text(
+                    content,
+                    context=f"{self.provider_name}_call"
+                )
+                total_redactions += redaction_count
+                
+                # Create new message with redacted content
+                redacted_msg = msg.__class__(content=redacted_content)
+                # Copy other attributes
+                if hasattr(msg, 'additional_kwargs'):
+                    redacted_msg.additional_kwargs = msg.additional_kwargs
+                redacted_messages.append(redacted_msg)
+            else:
+                redacted_messages.append(msg)
+        
+        self._total_redactions += total_redactions
+        return redacted_messages, total_redactions
+    
+    def _show_cloud_warning(self, redaction_count: int):
+        """Display prominent warning about cloud usage."""
+        # Warning banner removed - no longer needed
+        pass
+    
+    @retry(
+        retry=retry_if_exception_type((Exception,)),
+        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_attempt(5),
+        before_sleep=lambda retry_state: console.print(
+            f"[yellow]⚠️  API error (attempt {retry_state.attempt_number}/5): {retry_state.outcome.exception()}. Retrying in {retry_state.next_action.sleep} seconds...[/yellow]"
+        ),
+        reraise=True,
+    )
+    def invoke(self, messages: list[BaseMessage] | str, **kwargs: Any) -> Any:
+        """Invoke the LLM with redacted messages.
+        
+        Args:
+            messages: Messages to send (list of BaseMessage or string)
+            **kwargs: Additional arguments for LLM
+            
+        Returns:
+            LLM response
+        """
+        # Redact messages
+        redacted_messages, redaction_count = self._redact_messages(messages)
+        
+        # Show warning
+        self._show_cloud_warning(redaction_count)
+        
+        # Call underlying LLM
+        return self.llm.invoke(redacted_messages, **kwargs)
+    
+    def _generate(self, messages: list[BaseMessage] | str, **kwargs: Any) -> Any:
+        """Generate method for LangChain compatibility."""
+        redacted_messages, redaction_count = self._redact_messages(messages)
+        self._show_cloud_warning(redaction_count)
+        return self.llm._generate(redacted_messages, **kwargs)
+    
+    def __getattr__(self, name: str) -> Any:
+        """Delegate attribute access to underlying LLM.
+        
+        Private attributes are handled by Pydantic's __pydantic_private__ dict.
+        Only delegate to underlying LLM if the attribute is not in private storage.
+        """
+        # Check if this is a private attribute managed by Pydantic
+        if name.startswith('_'):
+            # Try to get from Pydantic's private storage first
+            private_attrs = object.__getattribute__(self, '__pydantic_private__')
+            if name in private_attrs:
+                return private_attrs[name]
+            # If not in private storage, raise AttributeError
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        
+        # Delegate public attributes to underlying LLM
+        return getattr(self.llm, name)
+    
+    @property
+    def _llm_type(self) -> str:
+        """Return LLM type."""
+        return f"redacted_{self.llm._llm_type}"
+
+
+def _wrap_with_redaction(llm: BaseChatModel, provider_name: str, session_id: str | None) -> BaseChatModel:
+    """Wrap an LLM with redaction if not in local-only mode.
+    
+    Args:
+        llm: LLM to wrap
+        provider_name: Provider name for logging
+        session_id: Session ID for audit logging
+        
+    Returns:
+        Wrapped or original LLM
+    """
+    if settings.local_only_mode:
+        # No need to wrap in local-only mode (already enforced)
+        return llm
+    
+    # Wrap cloud providers with redaction (use keyword arguments for Pydantic)
+    return RedactionLLMWrapper(llm=llm, provider_name=provider_name, session_id=session_id)
+
 

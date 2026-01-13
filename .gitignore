@@ -56,3 +56,6 @@ reports/
 *.dmp
 symbols/
 .sessions/
+
+# Security - custom redaction patterns (may contain org-specific info)
+.redaction/custom_patterns.py

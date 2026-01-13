@@ -19,35 +19,56 @@ class ReasonerAgent:
     
     def reason(self, state: AnalysisState) -> dict:
         """Analyze all evidence and draw conclusions."""
-        # Determine if we're in synthesis mode (all hypotheses rejected)
-        hypothesis_status = state.get('hypothesis_status', 'testing')
-        all_rejected = hypothesis_status != 'confirmed' and len(state.get('hypothesis_tests', [])) > 0
-        
-        if all_rejected:
-            console.print(f"\n[bold magenta]🔍 Synthesizing Findings from Evidence[/bold magenta]")
-            console.print(f"[dim]All tested hypotheses ruled out - analyzing what the evidence actually shows...[/dim]")
+        # Check if this is re-analysis after critique-triggered investigation
+        if state.get('critique_triggered_investigation', False):
+            console.print(f"\n[bold magenta]🧠 Re-analyzing with Newly Collected Evidence[/bold magenta]")
+            console.print(f"[dim]Incorporating evidence from critic's investigation requests...[/dim]")
         else:
-            console.print(f"\n[bold magenta]🧠 Reasoning Over Evidence[/bold magenta]")
+            # Determine if we're in synthesis mode (all hypotheses rejected)
+            hypothesis_status = state.get('hypothesis_status', 'testing')
+            all_rejected = hypothesis_status != 'confirmed' and len(state.get('hypothesis_tests', [])) > 0
+            
+            if all_rejected:
+                console.print(f"\n[bold magenta]🔍 Synthesizing Findings from Evidence[/bold magenta]")
+                console.print(f"[dim]All tested hypotheses ruled out - analyzing what the evidence actually shows...[/dim]")
+            else:
+                console.print(f"\n[bold magenta]🧠 Reasoning Over Evidence[/bold magenta]")
         
         evidence_inventory = state.get('evidence_inventory', {})
         total_evidence = sum(len(ev) for ev in evidence_inventory.values())
         
         console.print(f"[dim]Analyzing {total_evidence} pieces of evidence...[/dim]")
         
+        # Deduplicate evidence by command (same command run multiple times across hypothesis tests)
+        seen_commands = {}
+        for task, evidence_list in evidence_inventory.items():
+            for e in evidence_list:
+                cmd = e.get('command', 'unknown')
+                # Keep only the most recent instance of each command
+                if cmd not in seen_commands:
+                    seen_commands[cmd] = (task, e)
+        
+        console.print(f"[dim]Deduplicated to {len(seen_commands)} unique commands (from {total_evidence} total)[/dim]")
+        
         # Build evidence summary for reasoning
         evidence_summary = []
         total_chars = 0
-        MAX_TOTAL = 800000  # ~200K tokens for Claude Sonnet 4.5
+        MAX_TOTAL = 600000  # ~150K tokens for Claude Sonnet 4.5 (leave 50K for system prompt)
         
-        for task, evidence_list in evidence_inventory.items():
+        # Group deduplicated evidence by task for readability
+        task_groups = {}
+        for cmd, (task, e) in seen_commands.items():
+            if task not in task_groups:
+                task_groups[task] = []
+            task_groups[task].append((cmd, e))
+        
+        for task, cmd_evidence_list in task_groups.items():
             if total_chars >= MAX_TOTAL:
                 evidence_summary.append(f"\n[Additional tasks truncated to stay within limits]")
                 break
                 
             evidence_summary.append(f"\n**Task: {task}**")
-            for e in evidence_list:
-                cmd = e.get('command', 'unknown')
-                
+            for cmd, e in cmd_evidence_list:
                 # Check if this is external evidence with analysis
                 if e.get('evidence_type') == 'external' and e.get('summary'):
                     # Use analyzed summary for cost efficiency (already contains key findings)
@@ -371,16 +392,20 @@ OR if critical correlation data needed:
                 console.print(f"[green]✓ Fixed and parsed JSON successfully[/green]")
             
             console.print(f"[green]✓ Analysis complete[/green]")
-            console.print(f"[dim]Confidence: {result['confidence_level']}[/dim]")
+            # Only show these messages if NOT in critique-triggered investigation mode
+            if not state.get('critique_triggered_investigation', False):
+                console.print(f"[dim]Confidence: {result['confidence_level']}[/dim]")
             
             # Check if deeper investigation is needed
             needs_deeper = result.get('needs_deeper_investigation', False)
             investigation_requests = result.get('investigation_requests', [])
             
+            # Only show gaps if NOT in critique-triggered investigation mode
             if needs_deeper and investigation_requests:
-                console.print(f"[yellow]🔍 Identified {len(investigation_requests)} gap(s) requiring deeper investigation[/yellow]")
-                for i, req in enumerate(investigation_requests, 1):
-                    console.print(f"[dim]  {i}. {req.get('question', 'Unknown question')}[/dim]")
+                if not state.get('critique_triggered_investigation', False):
+                    console.print(f"[yellow]🔍 Identified {len(investigation_requests)} gap(s) requiring deeper investigation[/yellow]")
+                    for i, req in enumerate(investigation_requests, 1):
+                        console.print(f"[dim]  {i}. {req.get('question', 'Unknown question')}[/dim]")
             
             return {
                 'reasoner_analysis': result['analysis'],
@@ -400,15 +425,33 @@ OR if critical correlation data needed:
             except:
                 pass
             console.print(f"[yellow]Using fallback analysis[/yellow]")
+            # Fallback - check actual hypothesis status
+            hypothesis_status = state.get('hypothesis_status', 'testing')
+            current_hyp = state.get('current_hypothesis', 'Unknown')
+            
+            if hypothesis_status == 'confirmed':
+                conclusions = [
+                    f"Hypothesis '{current_hyp}' was confirmed",
+                    "Investigation completed across all planned tasks"
+                ]
+            elif hypothesis_status == 'rejected':
+                conclusions = [
+                    "All tested hypotheses were rejected by evidence",
+                    f"Most recent hypothesis: {current_hyp}",
+                    "Evidence analysis incomplete due to token limit - manual investigation may be needed"
+                ]
+            else:
+                conclusions = [
+                    f"Hypothesis testing in progress: {current_hyp}",
+                    "Investigation ongoing"
+                ]
+            
             # Fallback
             return {
-                'reasoner_analysis': f"Analyzed evidence from {len(evidence_inventory)} investigation tasks.",
-                'conclusions': [
-                    f"Hypothesis '{state['current_hypothesis']}' was confirmed",
-                    "Investigation completed across all planned tasks"
-                ],
-                'confidence_level': 'medium',
-                'needs_deeper_investigation': False,
+                'reasoner_analysis': f"Analyzed evidence from {len(evidence_inventory)} investigation tasks. Analysis truncated due to token limits.",
+                'conclusions': conclusions,
+                'confidence_level': 'low',  # Low confidence due to incomplete analysis
+                'needs_deeper_investigation': hypothesis_status != 'confirmed',
                 'investigation_requests': [],
                 'reasoning_iterations': state.get('reasoning_iterations', 0) + 1
             }

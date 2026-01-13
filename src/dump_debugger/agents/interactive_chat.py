@@ -491,7 +491,7 @@ CRITICAL - If suggesting commands:
     def _generate_investigative_commands(
         self, question: str, context: dict[str, Any], state: AnalysisState
     ) -> list[str]:
-        """Generate debugger commands to answer the question.
+        """Generate debugger commands to answer the question with progressive object graph traversal.
         
         Args:
             question: User's question
@@ -503,36 +503,110 @@ CRITICAL - If suggesting commands:
         """
         dump_type = state.get('dump_type', 'user')
         
-        prompt = f"""You are a Windows debugger expert. Generate WinDbg/CDB commands to answer this question.
+        # Build evidence context showing what we've already collected
+        evidence_context = ""
+        attempted_commands = context.get('attempted_commands', [])
+        if attempted_commands:
+            evidence_context += "\n\nCOMMANDS ALREADY EXECUTED (do not repeat these):\n"
+            for cmd in attempted_commands:
+                evidence_context += f"- {cmd}\n"
+        
+        # Show evidence we've collected to help with progressive traversal
+        relevant_evidence = context.get('relevant_evidence', [])
+        if relevant_evidence:
+            evidence_context += "\n\nEVIDENCE COLLECTED SO FAR:\n"
+            for i, evidence in enumerate(relevant_evidence[-5:], 1):  # Last 5 pieces of evidence
+                cmd = evidence.get('command', 'N/A')
+                evidence_context += f"{i}. Command: {cmd}\n"
+                
+                # Show key information that might contain addresses or references to follow
+                summary = evidence.get('summary', '')
+                output = evidence.get('output', '')
+                
+                if summary:
+                    evidence_context += f"   Summary: {summary[:500]}\n"
+                elif output:
+                    evidence_context += f"   Output preview: {output[:500]}\n"
+                
+                # Highlight any object addresses or method tables found
+                import re
+                addresses = re.findall(r'0x[0-9a-f]{8,16}', output[:2000], re.IGNORECASE)
+                if addresses:
+                    unique_addresses = list(dict.fromkeys(addresses))[:5]  # First 5 unique addresses
+                    evidence_context += f"   → Contains addresses: {', '.join(unique_addresses)}\n"
+        
+        prompt = f"""You are a Windows debugger expert analyzing a memory dump. Generate WinDbg/CDB commands to answer this question using PROGRESSIVE OBJECT GRAPH TRAVERSAL.
 
 DUMP TYPE: {dump_type}
 ORIGINAL ISSUE: {context['issue_description']}
 USER QUESTION: {question}
+{evidence_context}
+
+CRITICAL: PROGRESSIVE OBJECT GRAPH TRAVERSAL STRATEGY
+When the question requires finding specific data (like database connection strings, configuration values, etc.):
+
+1. START BROAD: First identify the relevant objects/threads
+   Example: !dumpheap -type System.Data.SqlClient.SqlConnection
+
+2. GET ADDRESSES: From the results, identify specific object addresses or method tables
+   Example: If !dumpheap shows addresses like 0x000002541c3def00
+
+3. EXAMINE OBJECTS: Use !do (dumpobj) to inspect the object and find field references
+   Example: !do 0x000002541c3def00
+
+4. FOLLOW REFERENCES: Look at the object fields and follow references to find nested data
+   Example: If !do shows _connectionString field at 0x000002541c400000, then !do 0x000002541c400000
+
+5. EXTRACT VALUES: Once you reach string/value objects, dump them to get the actual data
+   Example: !do <string_object_address> shows the actual string value
+
+EXAMPLES OF PROGRESSIVE TRAVERSAL:
+- Question: "What database is the app connected to?"
+  Commands: [
+    "!dumpheap -type System.Data.SqlClient.SqlConnection",  // Find connection objects
+    "!do <address_from_previous>",  // Examine first connection object
+    "!do <connectionString_field_address>",  // Follow to connection string field
+    "!do <server_field_address>"  // Follow to server name if needed
+  ]
+
+- Question: "What's in the configuration object?"
+  Commands: [
+    "!dumpheap -type ConfigurationManager",  // Find config object
+    "!do <address>",  // Examine configuration object
+    "!do <settings_field_address>"  // Follow to settings collection
+  ]
 
 AVAILABLE COMMANDS:
-- For .NET/managed code: !threads, !clrstack, !dumpheap, !gcroot, !finalizequeue, !syncblk, !threadpool
+- For .NET/managed code: !threads, !clrstack, !dumpheap, !do, !gcroot, !finalizequeue, !syncblk, !threadpool
 - For native code: k, ~*k, !analyze -v, dt, dv, !locks, !handle
 - For general info: lm, !process, !peb, .lastevent
 
-Generate 1-5 specific commands that will help answer the question.
+IMPORTANT: 
+- If previous evidence shows object addresses, use !do <address> to examine those objects
+- Build a SEQUENCE of commands where each step provides input for the next
+- Use placeholder syntax ADDR_FROM_{pattern} when you need to reference addresses from previous output
+  Example: "!do ADDR_FROM_SqlConnection" means "use the address from the SqlConnection output"
+
+Generate 3-8 commands that progressively drill down to answer the question.
 
 CRITICAL COMMAND SYNTAX RULES:
 - Use ONLY pure WinDbg/CDB commands - NEVER PowerShell syntax
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_, any PowerShell operators
 - THREAD-SPECIFIC COMMANDS: Always combine thread switch with command (e.g., '~8e !clrstack', NOT '~8s' then '!clrstack')
 - INVALID EXAMPLES: '~*e !clrstack | findstr Thread', '!dumpheap | foreach', '~8s' followed by '!clrstack'
-- VALID EXAMPLES: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk'
+- VALID EXAMPLES: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk', '!do 0x12345'
 - For filtering: Use WinDbg native commands only (e.g., ~*e applies to all threads)
 - For batch: Suggest single representative commands, not loops
 
 Respond in JSON format:
 {{
     "commands": ["command1", "command2", ...],
-    "reasoning": "Why these commands will help"
+    "reasoning": "Explain the progressive traversal strategy - how each command builds on previous results",
+    "traversal_plan": "Brief description of the object graph path you're following"
 }}"""
 
         messages = [
-            SystemMessage(content="You are an expert Windows crash dump analyst."),
+            SystemMessage(content="You are an expert Windows crash dump analyst with deep knowledge of object graph traversal."),
             HumanMessage(content=prompt)
         ]
         
@@ -541,6 +615,8 @@ Respond in JSON format:
         
         if result and 'commands' in result:
             console.print(f"[dim]Strategy: {result.get('reasoning', 'N/A')}[/dim]")
+            if 'traversal_plan' in result:
+                console.print(f"[dim cyan]Object Graph Path: {result['traversal_plan']}[/dim cyan]")
             return result['commands']
         
         # Fallback to basic commands

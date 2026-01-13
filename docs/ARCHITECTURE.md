@@ -130,21 +130,6 @@ Report: Generates final report with root cause
 When gap detected: `🔍 Identified 2 gap(s) requiring deeper investigation`  
 When looping back: `🔄 Iteration 1: Reasoner identified 2 gap(s)`  
 When max reached: `⚠ Max reasoning iterations (3) reached`
-         Returns: [{"question": "Which SqlCommand objects correspond to timeouts?", 
-                   "context": "...", "approach": "Use !do to extract references"}]
-```
-
-**Iteration 1 (Deeper Investigation):**
-```
-Workflow: Routes back to "investigate" with new plan
-Investigator: Generates !do commands on timeout objects
-             Extracts SqlCommand references from exception fields
-             Runs !do on SqlCommand addresses
-Reasoner: "Timeout occurred in query: SELECT * FROM LargeTable WHERE..."
-         Sets needs_deeper_investigation = false
-```
-
-See `ITERATIVE_REASONING.md` for complete details.
 
 ## Quality Review System
 
@@ -334,17 +319,64 @@ The system tracks token usage separately for local vs cloud LLMs:
   - `critic.py` - Quality review and critique
   - `report_writer.py` - Report generation
   - `interactive_chat.py` - Follow-up Q&A
-- `src/dump_debugger/evidence/*`: evidence storage, retrieval, analysis orchestration
-- `src/dump_debugger/analyzers/*`: specialized analyzers + registry
+- `src/dump_debugger/evidence/`: evidence storage, retrieval, and analysis orchestration
+  - `storage.py` - Evidence persistence
+  - `retrieval.py` - Evidence querying
+  - `analyzer.py` - Analysis coordination
+- `src/dump_debugger/analyzers/`: specialized command output analyzers + registry
+  - `base.py` - Base analyzer class
+  - `registry.py` - Analyzer registration and lookup
+  - Individual analyzers: `threads.py`, `threadpool.py`, `clrstack.py`, `dumpheap.py`, `syncblk.py`, etc.
+- `src/dump_debugger/security/redactor.py`: intelligent pattern-based redaction for cloud LLM calls
 - `src/dump_debugger/workflows.py`: LangGraph orchestration (no agent business logic)
+
+## Data Redaction
+
+When using cloud LLM providers, the `DataRedactor` component attempts to protect sensitive information:
+
+**Architecture:**
+- **Pattern-based detection**: Credit cards (Luhn validation), SSNs (SSA rules), emails, API keys, tokens
+- **Context-aware filtering**: Memory addresses and hash codes are NOT redacted when in technical contexts
+- **Stable placeholders**: Same value always gets same placeholder (e.g., `CC_1`) for consistent LLM reasoning
+- **Audit trail**: Optional logging via `--audit-redaction` flag to track what was redacted
+
+**Integration Points:**
+- Wraps all debugger command outputs before sending to cloud LLMs
+- Applied at evidence collection time in `debugger.py`
+- Disabled entirely in `LOCAL_ONLY_MODE`
+
+**Extensibility:**
+Add custom redaction patterns without modifying source code:
+
+1. **Custom Patterns File** (Recommended):
+   - Create `.redaction/custom_patterns.py` based on `.redaction/example_patterns.py`
+   - Define patterns as a list of `RedactionPattern` objects:
+     ```python
+     CUSTOM_PATTERNS = [
+         RedactionPattern(
+             name="INTERNAL_ID",
+             pattern=r"\bID-\d{8}-[A-Z]{3}\b",
+             replacement="[INTERNAL_ID]",
+             description="Company-specific ID format"
+         )
+     ]
+     ```
+   - Patterns are automatically loaded at startup
+   - File is ignored by git to keep your patterns private
+
+2. **Source Code Extension** (Advanced):
+   - Edit `src/dump_debugger/security/redactor.py`
+   - Add pattern to built-in patterns list
+   - Implement custom validation in `_validate_match()` if needed
 
 ## Extending the System
 
 ### Add a new analyzer
 
 1. Create a new analyzer in `src/dump_debugger/analyzers/`
-2. Implement `can_analyze()` and `analyze()`
-3. Register it in the analyzers package/registry
+2. Inherit from `BaseAnalyzer` in `base.py`
+3. Implement `can_analyze()` and `analyze()` methods
+4. Register it in `registry.py`
 
 Keep analyzers narrowly scoped: match a command family, parse structured output, return a structured result + a concise summary.
 
