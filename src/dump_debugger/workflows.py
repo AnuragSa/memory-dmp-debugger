@@ -7,6 +7,8 @@ from typing import Optional, TextIO
 
 from langgraph.graph import END, StateGraph
 from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from dump_debugger.config import settings
 from dump_debugger.core import DebuggerWrapper
@@ -20,11 +22,78 @@ from dump_debugger.agents import (
     ReportWriterAgentV2,
 )
 from dump_debugger.llm import get_llm
+from dump_debugger.security.redactor import load_custom_patterns
 from dump_debugger.state import AnalysisState, Evidence, InvestigatorOutput, ReasonerOutput
 from dump_debugger.token_tracker import get_tracker
 from dump_debugger.analyzer_stats import usage_tracker
 
 console = Console()
+
+
+def _display_security_banner():
+    """Display security and privacy status banner."""
+    from pathlib import Path
+    
+    # Determine security mode
+    if settings.local_only_mode:
+        # Local-only mode - maximum security
+        panel_content = (
+            "[bold green]🔒 LOCAL-ONLY MODE ACTIVE[/bold green]\n\n"
+            "[green]✓[/green] All processing stays on your machine\n"
+            "[green]✓[/green] No data sent to cloud services\n"
+            "[green]✓[/green] Using local LLM (Ollama)\n"
+        )
+        
+        # Add custom patterns info
+        custom_patterns = load_custom_patterns(settings.redaction_patterns_path)
+        if custom_patterns:
+            panel_content += f"[green]✓[/green] {len(custom_patterns)} custom redaction patterns loaded\n"
+        
+        # Add audit status
+        if settings.enable_redaction_audit:
+            panel_content += "[green]✓[/green] Redaction audit logging enabled\n"
+        
+        console.print(Panel(
+            panel_content,
+            border_style="green",
+            title="🔒 Security Status",
+            title_align="left"
+        ))
+    else:
+        # Cloud mode - show warnings and redaction status
+        provider_name = settings.llm_provider.upper()
+        if settings.use_tiered_llm:
+            provider_name = f"{settings.cloud_llm_provider.upper()} (tiered with local)"
+        
+        panel_content = (
+            f"[bold yellow]⚠️  CLOUD MODE - {provider_name}[/bold yellow]\n\n"
+            "[yellow]![/yellow] Data will be sent to cloud LLM for analysis\n"
+            "[green]✓[/green] Sensitive data is automatically redacted before transmission\n"
+        )
+        
+        # Show redaction patterns
+        custom_patterns = load_custom_patterns(settings.redaction_patterns_path)
+        total_patterns = 40 + len(custom_patterns)  # ~40 built-in patterns
+        panel_content += f"[green]✓[/green] {total_patterns} redaction patterns active "
+        if custom_patterns:
+            panel_content += f"({len(custom_patterns)} custom)\n"
+        else:
+            panel_content += "(built-in only)\n"
+        
+        # Add audit status
+        if settings.enable_redaction_audit:
+            panel_content += "[green]✓[/green] Redaction audit logging enabled\n"
+        
+        panel_content += "\n[dim]To prevent all cloud calls, use: --local-only flag[/dim]"
+        
+        console.print(Panel(
+            panel_content,
+            border_style="yellow",
+            title="🔒 Security Status",
+            title_align="left"
+        ))
+    
+    console.print()  # Add spacing
 
 
 # Signal handler for clean exit
@@ -226,6 +295,19 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     def investigate_node(state: AnalysisState) -> dict:
         """Deep investigation of current task (after hypothesis confirmed)."""
         current_task = state.get('current_task', '')
+        current_idx = state.get('current_task_index', 0)
+        total_tasks = len(state.get('investigation_plan', []))
+        is_from_critic = state.get('critique_triggered_investigation', False)
+        
+        # Show which task we're investigating
+        if is_from_critic:
+            console.print(f"\n[bold cyan]📊 Task {current_idx + 1}/{total_tasks}[/bold cyan]")
+            # Extract just the main question part (before Context: or Suggested approach:)
+            task_display = current_task.split(' Context:')[0].split(' Suggested approach:')[0]
+            if len(task_display) > 100:
+                console.print(f"[cyan]{task_display[:100]}...[/cyan]")
+            else:
+                console.print(f"[cyan]{task_display}[/cyan]")
         
         # Perform investigation
         result = investigator.investigate_task(state)
@@ -258,6 +340,9 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
 
     def reason_node(state: AnalysisState) -> dict:
         """Analyze all evidence and draw conclusions."""
+        # Note: The ReasonerAgent.reason() method prints its own header,
+        # so we don't need to print one here
+        
         # Before reasoning, ensure hypothesis test evidence is in the inventory
         # This is critical when all hypotheses are rejected - otherwise evidence is lost
         evidence_inventory = state.get('evidence_inventory', {}).copy()
@@ -283,6 +368,10 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         if 'evidence_inventory' not in result:
             result['evidence_inventory'] = evidence_inventory
         
+        # Clear critique investigation flag if it was set
+        if state.get('critique_triggered_investigation', False):
+            result['critique_triggered_investigation'] = False
+        
         return result
     
     def critique_node(state: AnalysisState) -> dict:
@@ -290,46 +379,95 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         return critic.critique(state)
     
     def respond_to_critique_node(state: AnalysisState) -> dict:
-        """Respond to critic's feedback by collecting missing evidence and re-analyzing."""
+        """Respond to critique feedback - collect evidence if needed or re-analyze.
+        
+        The critic may identify:
+        1. Evidence gaps requiring new commands → route to investigation
+        2. Analysis quality issues (logic, contradictions) → re-run reasoner
+        """
         critique_result = state.get('critique_result', {})
+        issues = critique_result.get('critical_issues', [])
+        suggested_actions = critique_result.get('suggested_actions', [])
         
-        # Handle both old and new critique result formats
-        issues = critique_result.get('issues_found', [])
-        if isinstance(issues, bool):
-            # Old format where issues_found is a boolean
-            if issues:
-                console.print(f"\n[bold cyan]🔧 Addressing Critique Issues[/bold cyan]")
-            else:
-                console.print(f"\n[bold cyan]🔧 Re-analyzing[/bold cyan]")
+        console.print(f"\n[bold cyan]📝 Responding to Round 1 Critique[/bold cyan]")
+        
+        # Check if critic is requesting new evidence collection
+        # Look for action items that mention debugger commands
+        evidence_requests = []
+        command_keywords = ['!', 'execute', 'run', 'show actual', 'display', 'collect', 'gather']
+        
+        for action in suggested_actions:
+            action_lower = action.lower()
+            # Check if this is a request for new evidence (mentions commands)
+            if any(keyword in action_lower for keyword in command_keywords):
+                evidence_requests.append(action)
+        
+        if evidence_requests:
+            # Critic identified evidence gaps - need to collect more data
+            console.print(f"[yellow]⚠ Critic identified {len(evidence_requests)} evidence gap(s) requiring investigation[/yellow]")
+            console.print(f"[dim]Collecting missing evidence before re-analysis...[/dim]\n")
+            
+            # Convert critic's suggestions into investigation requests
+            investigation_requests = []
+            for action in evidence_requests:
+                investigation_requests.append({
+                    'question': action,
+                    'context': 'Critic identified evidence gap',
+                    'approach': action
+                })
+            
+            # Set flags to route to investigation
+            current_round = state.get('critique_round', 0)
+            return {
+                'needs_evidence_collection': True,
+                'investigation_requests': investigation_requests,
+                'critique_triggered_investigation': True,
+                'critique_round': current_round + 1  # Increment for next round
+            }
         else:
-            # New format where issues_found is a list
-            console.print(f"\n[bold cyan]🔧 Addressing {len(issues)} Critique Issues[/bold cyan]")
-        
-        # TODO: Implement evidence collection based on critique
-        # For now, just re-analyze with same evidence
-        return reasoner.reason(state)
+            # No evidence gaps - just analysis quality issues
+            # Re-run reasoner with critique feedback to address logical issues
+            console.print(f"[dim]Addressing {len(issues)} concern(s) through re-analysis...[/dim]\n")
+            
+            result = reasoner.reason(state)
+            
+            # Increment critique round for tracking
+            current_round = state.get('critique_round', 0)
+            result['critique_round'] = current_round + 1
+            result['needs_evidence_collection'] = False
+            
+            return result
     
     def prepare_deeper_investigation_node(state: AnalysisState) -> dict:
         """Prepare state for deeper investigation based on reasoner's gap requests."""
         investigation_requests = state.get('investigation_requests', [])
+        is_from_critic = state.get('critique_triggered_investigation', False)
         
-        console.print(f"[dim]Preparing investigation plan from {len(investigation_requests)} gap request(s)[/dim]")
+        if is_from_critic:
+            console.print(f"\n[bold cyan]🔍 Setting Up Evidence Collection[/bold cyan]")
+            console.print(f"[cyan]Preparing {len(investigation_requests)} investigation task(s) from critique feedback[/cyan]\n")
+        else:
+            console.print(f"\n[cyan]🔍 Preparing deeper investigation from {len(investigation_requests)} gap request(s)[/cyan]\n")
         
         # Convert investigation requests to investigation plan
         investigation_plan = []
-        for req in investigation_requests:
+        for i, req in enumerate(investigation_requests, 1):
             question = req.get('question', '')
             context = req.get('context', '')
             approach = req.get('approach', '')
             
             # Add detailed task to investigation plan
             task_description = f"{question}"
-            if context:
+            if context and context != 'Critic identified evidence gap':
                 task_description += f" Context: {context}"
-            if approach:
+            if approach and approach != question:  # Don't duplicate if approach same as question
                 task_description += f" Suggested approach: {approach}"
             
-            console.print(f"[dim]  → {question[:80]}...[/dim]" if len(question) > 80 else f"[dim]  → {question}[/dim]")
+            # Show task with number for clarity
+            if len(question) > 80:
+                console.print(f"[dim]  {i}. {question[:80]}...[/dim]")
+            else:
+                console.print(f"[dim]  {i}. {question}[/dim]")
             investigation_plan.append(task_description)
         
         # Return state updates
@@ -339,109 +477,6 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
             'current_task': investigation_plan[0] if investigation_plan else '',
             'investigation_results': []  # Clear previous results for new iteration
         }
-        
-        if not critique_result.get('issues_found', False):
-            # No issues - proceed to report
-            return {}
-        
-        console.print(f"\n[bold yellow]📝 Responding to Critique[/bold yellow]")
-        
-        # Extract only WinDbg commands from suggested actions (e.g., !threadpool, !syncblk)
-        suggested_actions = critique_result.get('suggested_actions', [])
-        commands_to_run = []
-        
-        import re
-        for action in suggested_actions:
-            # Match WinDbg commands: !command or ~thread !command
-            # Pattern: optional ~thread prefix, then !word, optionally with -flags
-            matches = re.findall(r'(~[\w*]+\s+)?(![\w\-]+(?:\s+\-[\w]+)*)', action)
-            for match in matches:
-                prefix = match[0].strip() if match[0] else ""
-                cmd = match[1].strip()
-                full_cmd = f"{prefix} {cmd}".strip() if prefix else cmd
-                
-                # Only add simple commands (not descriptions)
-                if len(full_cmd.split()) <= 4 and full_cmd not in commands_to_run:
-                    commands_to_run.append(full_cmd)
-        
-        # Check if these commands were already run
-        evidence_inventory = state.get('evidence_inventory', {})
-        commands_executed = state.get('commands_executed', [])
-        
-        new_commands = []
-        for cmd in commands_to_run:
-            # Check if command already exists in evidence
-            already_have_evidence = False
-            for task_evidence in evidence_inventory.values():
-                if any(cmd in e.get('command', '') for e in task_evidence):
-                    already_have_evidence = True
-                    break
-            
-            if not already_have_evidence and cmd not in commands_executed:
-                new_commands.append(cmd)
-        
-        # Collect missing evidence if needed
-        state_updates = {}
-        if new_commands:
-            console.print(f"[dim]Collecting {len(new_commands)} missing pieces of evidence:[/dim]")
-            
-            evidence_inventory = evidence_inventory.copy()
-            critique_task = "Critique-requested evidence"
-            
-            if critique_task not in evidence_inventory:
-                evidence_inventory[critique_task] = []
-            
-            for cmd in new_commands:
-                try:
-                    console.print(f"  [dim]Running: {cmd}[/dim]")
-                    result = debugger.execute_command(cmd)
-                    
-                    # execute_command returns a dict with 'output' key
-                    if isinstance(result, dict):
-                        output = result.get('output', '')
-                    else:
-                        output = result
-                    
-                    if output and not str(output).startswith("Error:"):
-                        evidence = {
-                            'command': cmd,
-                            'output': output,
-                            'success': True
-                        }
-                        evidence_inventory[critique_task].append(evidence)
-                        console.print(f"  [green]✓[/green] Collected")
-                    else:
-                        console.print(f"  [yellow]⚠ No output[/yellow]")
-                        
-                except Exception as e:
-                    console.print(f"  [yellow]⚠ Failed: {e}[/yellow]")
-            
-            state_updates['evidence_inventory'] = evidence_inventory
-        else:
-            console.print(f"[dim]All requested evidence already collected. Re-analyzing with critique feedback...[/dim]")
-        
-        # Re-run reasoner with critique awareness and any new evidence
-        merged_state = {**state, **state_updates}
-        
-        try:
-            reasoner_updates = reasoner.reason(merged_state)
-            
-            # Show updated analysis summary for visibility
-            console.print(f"\n[bold cyan]Updated Analysis:[/bold cyan]")
-            console.print(f"[dim]Confidence: {reasoner_updates.get('confidence_level', 'unknown')}[/dim]")
-            
-            # Show first 500 chars of updated analysis
-            analysis = reasoner_updates.get('reasoner_analysis', '')
-            preview = analysis[:500] + "..." if len(analysis) > 500 else analysis
-            console.print(f"[dim]{preview}[/dim]\n")
-            
-            # Merge all updates
-            return {**state_updates, **reasoner_updates}
-            
-        except Exception as e:
-            console.print(f"[yellow]⚠ Reasoner error during response: {e}[/yellow]")
-            # Return just the new evidence without analysis changes
-            return state_updates if state_updates else {}
 
     def report_node(state: AnalysisState) -> dict:
         """Generate final report or show analysis summary in interactive mode."""
@@ -656,19 +691,40 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         # Issues found and under max rounds - respond
         return "respond"
     
-    # Routing after respond
-    def route_after_respond(state: AnalysisState) -> str:
-        """After responding to critique, do another critique round."""
-        return "critique"
-    
     # Routing after reasoning
     def route_after_reason(state: AnalysisState) -> str:
-        """Route after reasoning: check confidence, gaps, then route appropriately."""
+        """Route after reasoning: PRIORITY 1: Check gaps first, PRIORITY 2: Check confidence, PRIORITY 3: Critique."""
         
-        # OPTIMIZATION: Check confidence level for early termination
         confidence_level = state.get('confidence_level', 'medium')
         reasoning_iterations = state.get('reasoning_iterations', 0)
         
+        # Check if this reasoning came from critique-triggered investigation
+        # If so, go back to critique Round 2 (don't check for more gaps)
+        if state.get('critique_triggered_investigation', False):
+            console.print(f"[cyan]→ Evidence collection complete, proceeding to Critique Round 2[/cyan]\n")
+            # Clear the flag and increment critique round
+            return "critique"
+        
+        # PRIORITY 1: Check for evidence gaps FIRST (Iterative Reasoning)
+        # This MUST happen before critique to ensure complete evidence
+        needs_deeper = state.get('needs_deeper_investigation', False)
+        investigation_requests = state.get('investigation_requests', [])
+        max_iterations = 2  # Reduced from 3 - be more decisive
+        
+        # Always handle gaps before proceeding to critique
+        if needs_deeper and investigation_requests and reasoning_iterations < max_iterations:
+            console.print(f"[cyan]🔄 Iteration {reasoning_iterations + 1}: Reasoner identified {len(investigation_requests)} gap(s)[/cyan]")
+            console.print(f"[cyan]   Current confidence: {confidence_level.upper()}[/cyan]")
+            console.print(f"[cyan]   Collecting missing evidence to enable definitive conclusions[/cyan]")
+            return "prepare_deeper_investigation"
+        
+        # Only show max iterations warning if NOT in critique-triggered investigation
+        if reasoning_iterations >= max_iterations:
+            if not state.get('critique_triggered_investigation', False):
+                console.print(f"[yellow]⚠ Max reasoning iterations ({max_iterations}) reached[/yellow]")
+                console.print(f"[yellow]   Proceeding to critique phase with current evidence[/yellow]")
+        
+        # PRIORITY 2: After evidence is complete, check confidence for informational message
         # Check for expert assessment consensus
         evidence_inventory = state.get('evidence_inventory', {})
         high_confidence_assessments = 0
@@ -685,29 +741,10 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         # Calculate overall confidence
         expert_confidence_ratio = high_confidence_assessments / total_assessments if total_assessments > 0 else 0
         
-        # EARLY TERMINATION: High confidence + sufficient evidence = skip iterative reasoning
-        if confidence_level == 'high' and expert_confidence_ratio > 0.7 and reasoning_iterations == 0:
+        # Show confidence status (informational only - always proceed to critique)
+        if confidence_level == 'high' and expert_confidence_ratio > 0.7 and not needs_deeper:
             console.print(f"[green]✓ HIGH confidence analysis with {expert_confidence_ratio:.0%} expert consensus[/green]")
-            console.print(f"[green]  Skipping iterative reasoning - conclusions are decisive and well-supported[/green]")
-            # Go straight to critique for quality check
-            return "critique"
-        
-        # Check if reasoner identified gaps requiring deeper investigation
-        needs_deeper = state.get('needs_deeper_investigation', False)
-        investigation_requests = state.get('investigation_requests', [])
-        max_iterations = 2  # Reduced from 3 - be more decisive
-        
-        # CRITICAL: Always collect missing evidence when gaps are identified
-        # Confidence checks only apply when we have all the evidence we need
-        if needs_deeper and investigation_requests and reasoning_iterations < max_iterations:
-            console.print(f"[cyan]🔄 Iteration {reasoning_iterations + 1}: Reasoner identified {len(investigation_requests)} gap(s)[/cyan]")
-            console.print(f"[cyan]   Current confidence: {confidence_level.upper()}[/cyan]")
-            console.print(f"[cyan]   Collecting missing evidence to enable definitive conclusions[/cyan]")
-            return "prepare_deeper_investigation"
-        
-        if reasoning_iterations >= max_iterations:
-            console.print(f"[yellow]⚠ Max reasoning iterations ({max_iterations}) reached[/yellow]")
-            console.print(f"[yellow]   Proceeding to critique phase with current evidence[/yellow]")
+            console.print(f"[green]  No evidence gaps detected - proceeding to quality review[/green]")
         
         # Normal flow: check hypothesis status
         hypothesis_status = state.get('hypothesis_status', 'testing')
@@ -726,37 +763,6 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         if state.get('chat_active', False):
             return "chat"
         return "end"
-    
-    # Routing after respond (re-analysis after critique)
-    def route_after_respond(state: AnalysisState) -> str:
-        """Route after responding to critique: check confidence and gaps before continuing."""
-        
-        # OPTIMIZATION: Check if re-analysis achieved high confidence
-        confidence_level = state.get('confidence_level', 'medium')
-        reasoning_iterations = state.get('reasoning_iterations', 0)
-        
-        # If we now have high confidence, skip further iteration
-        if confidence_level == 'high':
-            console.print(f"[green]✓ Re-analysis achieved HIGH confidence - proceeding to final critique[/green]")
-            return "critique"
-        
-        # Check if the re-analysis identified new gaps requiring deeper investigation
-        needs_deeper = state.get('needs_deeper_investigation', False)
-        investigation_requests = state.get('investigation_requests', [])
-        max_iterations = 2  # Reduced - be more decisive
-        
-        if needs_deeper and investigation_requests and reasoning_iterations < max_iterations:
-            # Only pursue if confidence is still low
-            if confidence_level == 'low':
-                console.print(f"[cyan]🔄 Re-analysis identified {len(investigation_requests)} gap(s) with LOW confidence[/cyan]")
-                console.print(f"[cyan]   Routing to deeper investigation for critical correlation data[/cyan]")
-                return "prepare_deeper_investigation"
-            else:
-                console.print(f"[cyan]📊 Confidence level {confidence_level.upper()} - gaps noted but sufficient for conclusions[/cyan]")
-                return "critique"
-        
-        # No gaps or max iterations reached - continue with critique round 2
-        return "critique"
     
     # Final steps - add critique loop
     workflow.add_conditional_edges(
@@ -781,7 +787,24 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         }
     )
     
-    # After respond, check if re-analysis identified gaps
+    # Routing after respond - check if evidence collection needed
+    def route_after_respond(state: AnalysisState) -> str:
+        """Route after responding to critique.
+        
+        If critic identified evidence gaps → collect evidence → re-reason → critique Round 2
+        If only analysis quality issues → already re-analyzed → critique Round 2
+        """
+        needs_collection = state.get('needs_evidence_collection', False)
+        investigation_requests = state.get('investigation_requests', [])
+        
+        if needs_collection:
+            console.print(f"[cyan]→ Routing to investigation to collect missing evidence[/cyan]\n")
+            return "prepare_deeper_investigation"
+        else:
+            # Already re-analyzed, go straight to Round 2
+            console.print(f"[cyan]→ No evidence collection needed, proceeding to Critique Round 2[/cyan]\n")
+            return "critique"
+    
     workflow.add_conditional_edges(
         "respond",
         route_after_respond,
@@ -842,6 +865,8 @@ def run_analysis(
     session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
     session_dir = session_manager.create_session(dump_path)
     
+    # Set session ID for redaction audit logging
+    settings.current_session_id = session_dir.name
     console.print(f"[dim]Session: {session_dir.name}[/dim]")
     
     # Set up logging to session directory
@@ -858,6 +883,8 @@ def run_analysis(
         sys.stdout = TeeOutput(_original_stdout, _log_file_handle)
     
     try:
+        # Security banner removed - no longer needed
+        
         # Validate dump file (debugger will be created inside workflow)
         # Just do a quick validation here
         if not dump_path.exists():

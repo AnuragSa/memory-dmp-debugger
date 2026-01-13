@@ -196,6 +196,57 @@ The debugger automatically recognizes these common issues:
 - **Handle Leak** - File/registry handles not released
 - **Async-over-Sync** - Blocking on async operations causing thread starvation
 
+## Security & Data Protection
+
+When using cloud LLM providers, the tool **attempts** to protect sensitive data through pattern-based redaction:
+
+### Intelligent Redaction System
+
+**Patterns Detected & Redacted:**
+- Credit cards (with Luhn algorithm validation)
+- Social Security Numbers (with SSA rules validation)
+- Email addresses
+- API keys and tokens
+- Connection strings and credentials
+- Private keys and certificates
+
+**Smart Features:**
+- **Validation**: Only valid credit cards (Luhn checksum) and SSNs (SSA rules) are redacted
+- **Stable placeholders**: Same value gets same placeholder (e.g., `CC_1`) for LLM reasoning
+- **Memory dump optimized**: Distinguishes between actual PII and technical data (hash codes, addresses)
+
+**Audit Trail:**
+- Enable audit logging with `--audit-redaction` flag to track what was redacted
+- All redactions logged to `.sessions/<session>/redaction_audit.log`
+- Use `--show-redacted-values` to include actual sensitive values in audit log (for debugging only - security risk!)
+
+**Local-Only Mode:**
+Set `LOCAL_ONLY_MODE=true` in `.env` to prevent all cloud LLM calls and process dumps entirely locally with Ollama.
+
+**Custom Patterns:**
+Add domain-specific redaction patterns without modifying source code:
+
+1. Copy `.redaction/example_patterns.py` to `.redaction/custom_patterns.py`
+2. Define your patterns using the `RedactionPattern` format:
+   ```python
+   from dump_debugger.security.redactor import RedactionPattern
+   
+   CUSTOM_PATTERNS = [
+       RedactionPattern(
+           name="EMPLOYEE_ID",
+           pattern=r"\bEMP\d{6}\b",
+           description="Employee ID format",
+           severity="warning"
+       )
+   ]
+   ```
+3. Your patterns will be automatically loaded and applied
+4. Use `--redaction-patterns /path/to/custom.py` to specify a custom location
+
+> **⚠️ Important Limitations:**  
+> - Redaction is a **best-effort** approach and may not catch all sensitive information. Memory dumps may contain domain-specific data not covered by current patterns.
+> - Use custom patterns (see above) to extend redaction for your specific environment.
+
 ## Architecture
 
 See `docs/ARCHITECTURE.md` for architecture documentation.

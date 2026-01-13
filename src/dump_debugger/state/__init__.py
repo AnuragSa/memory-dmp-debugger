@@ -93,6 +93,8 @@ class AnalysisState(TypedDict):
     critique_round: int  # Current critique iteration (0-based)
     critique_result: dict[str, Any]  # Critic's findings {issues_found, critical_issues, suggested_actions, severity}
     has_unresolved_issues: bool  # Whether issues remain after max rounds
+    needs_evidence_collection: bool  # Whether critic identified evidence gaps requiring investigation
+    critique_triggered_investigation: bool  # Whether current investigation was triggered by critique feedback
     
     # Final output
     final_report: str | None

@@ -71,7 +71,20 @@ class LLMRouter:
             
         Returns:
             Appropriate LLM instance
+            
+        Raises:
+            ValueError: If local-only mode is enabled but complex task requires cloud
         """
+        # SECURITY: Enforce local-only mode
+        if settings.local_only_mode:
+            if complexity == TaskComplexity.COMPLEX and not force_tier:
+                console.print(
+                    "[yellow]⚠️  Complex task in LOCAL-ONLY MODE - using local LLM "
+                    "(quality may be reduced)[/yellow]"
+                )
+            console.print(f"[dim]🔒 LLM: local ({settings.local_llm_model}) [local-only mode][/dim]")
+            return self.local_llm
+        
         # If tiered routing is disabled, always use configured LLM
         if not self.use_tiered:
             llm = get_llm(temperature=0.0)

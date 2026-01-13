@@ -14,6 +14,40 @@ from dump_debugger.config import settings
 
 console = Console()
 
+# Command risk levels for source-aware redaction
+COMMAND_RISK_LEVELS = {
+    # Low risk - call stacks, object counts, module lists
+    "!clrstack": "low",
+    "!dumpstack": "low",
+    "!dumpheap": "low",
+    "!dumpdomain": "low",
+    "!dumpmodule": "low",
+    "!dumpmt": "low",
+    "!dumpmd": "low",
+    "!dumpclass": "low",
+    "lm": "low",  # List modules
+    "k": "low",   # Stack trace
+    
+    # Medium risk - can contain string data, object contents
+    "!sos.eeheap": "medium",
+    "!eeheap": "medium",
+    "!dumpobj": "medium",
+    "!do": "medium",
+    "!dumparray": "medium",
+    "!da": "medium",
+    
+    # High risk - variable context, local variables, object dumps
+    "!sos.dumpvc": "high",
+    "!dumpvc": "high",
+    "!clrlocals": "high",
+    "!dso": "high",  # Dump stack objects
+    
+    # Critical risk - environment vars, HTTP headers, connection strings
+    "!peb": "critical",  # Process environment block
+    "!dumphttp": "critical",
+    "!dumpheaprequest": "critical",
+}
+
 
 class DebuggerError(Exception):
     """Base exception for debugger-related errors."""
@@ -113,7 +147,13 @@ class DebuggerWrapper:
                     api_version=settings.azure_openai_api_version,
                     azure_endpoint=endpoint
                 )
+            elif settings.embeddings_provider == "ollama":
+                # Ollama embeddings - return a marker object since Ollama doesn't use OpenAI client
+                # The actual embeddings are handled by OllamaEmbeddings in llm.py
+                console.print(f"[dim]Using local embeddings: {settings.local_embeddings_model}[/dim]")
+                return "ollama"  # Marker to indicate Ollama is configured
             else:
+                # Default to OpenAI
                 from openai import OpenAI
                 
                 if not settings.openai_api_key:
@@ -706,11 +746,18 @@ class DebuggerWrapper:
             embedding = None
             if self.embeddings_client and analysis.get('summary'):
                 try:
-                    embedding_response = self.embeddings_client.embeddings.create(
-                        input=analysis['summary'],
-                        model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                    )
-                    embedding = embedding_response.data[0].embedding
+                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
+                        # Use LangChain embeddings for Ollama
+                        from dump_debugger.llm import get_embeddings
+                        embeddings = get_embeddings()
+                        embedding = embeddings.embed_query(analysis['summary'])
+                    elif settings.embeddings_provider in ["openai", "azure"]:
+                        # Use OpenAI/Azure client
+                        embedding_response = self.embeddings_client.embeddings.create(
+                            input=analysis['summary'],
+                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
+                        )
+                        embedding = embedding_response.data[0].embedding
                 except Exception as e:
                     console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
             
@@ -763,16 +810,36 @@ class DebuggerWrapper:
                 'key_findings': analysis.get('key_findings', [])
             }
             
+            # Generate embedding from summary for semantic search (even for inline storage)
+            embedding = None
+            if self.embeddings_client and analysis.get('summary'):
+                try:
+                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
+                        # Use LangChain embeddings for Ollama
+                        from dump_debugger.llm import get_embeddings
+                        embeddings = get_embeddings()
+                        embedding = embeddings.embed_query(analysis['summary'])
+                    elif settings.embeddings_provider in ["openai", "azure"]:
+                        # Use OpenAI/Azure client
+                        embedding_response = self.embeddings_client.embeddings.create(
+                            input=analysis['summary'],
+                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
+                        )
+                        embedding = embedding_response.data[0].embedding
+                except Exception as e:
+                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            
             # Update the database with analysis if evidence was already cached
             if result.get('cached') and result.get('evidence_id'):
                 evidence_id = result['evidence_id']
                 self.evidence_store.conn.execute("""
                     UPDATE evidence 
-                    SET summary = ?, key_findings = ?
+                    SET summary = ?, key_findings = ?, embedding = ?
                     WHERE id = ?
                 """, [
                     analysis['summary'],
                     json.dumps(analysis['key_findings']),
+                    json.dumps(embedding) if embedding else None,
                     evidence_id
                 ])
                 self.evidence_store.conn.commit()

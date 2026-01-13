@@ -110,6 +110,9 @@ Return ONLY a JSON array of question strings, nothing else:
         confidence = state.get('confidence_level', 'medium')
         evidence = state.get('evidence_inventory', {})
         
+        # Get Round 1 critique for Round 2 context
+        previous_critique = state.get('critique_result', {})
+        
         # Build evidence summary
         evidence_summary = []
         for cmd, results in evidence.items():
@@ -119,6 +122,27 @@ Return ONLY a JSON array of question strings, nothing else:
         
         conclusions_text = "\n".join(f"- {c}" for c in conclusions)
         
+        # Build Round 1 context for Round 2
+        round1_context = ""
+        if current_round == 2 and previous_critique.get('issues_found'):
+            issues = previous_critique.get('critical_issues', [])
+            round1_context = f"""
+## ROUND 1 REVIEW (For your consideration)
+
+The first reviewer identified {len(issues)} concern(s). Consider whether you agree:
+
+"""
+            for i, issue in enumerate(issues, 1):
+                round1_context += f"{i}. [{issue.get('type', 'unknown')}] {issue.get('description', 'No description')}\n"
+            
+            round1_context += """
+YOUR TASK: Provide an independent second opinion. You may:
+- Agree with Round 1's concerns (confirm them)
+- Disagree if you think the analysis is actually sound
+- Find different issues Round 1 missed
+
+"""
+        
         prompt = f"""Review this crash dump analysis for CRITICAL issues only.
 
 ## CONTEXT
@@ -126,7 +150,7 @@ Return ONLY a JSON array of question strings, nothing else:
 **Original User Question:** {issue_description}
 
 The analysis must address THIS specific problem the user is trying to solve.
-
+{round1_context}
 ## ANALYSIS TO REVIEW
 
 **Hypothesis:** {hypothesis}
@@ -207,8 +231,7 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
             
             result = json.loads(content.strip())
             
-            # Display results only for Round 1 (visible critique)
-            # Round 2 is silent - only generates follow-up questions if needed
+            # Display results for both rounds
             if current_round == 1:
                 if result.get('issues_found', False):
                     console.print(f"[yellow]⚠ Issues Found ({result.get('severity', 'medium')} severity)[/yellow]")
@@ -223,6 +246,14 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
                             console.print(f"    - {action}")
                 else:
                     console.print("[green]✓ No critical issues found[/green]")
+            elif current_round == 2:
+                # Round 2: Show second opinion
+                if result.get('issues_found', False):
+                    console.print(f"[yellow]⚠ Round 2: Confirmed concerns ({result.get('severity', 'medium')} severity)[/yellow]")
+                    issue_count = len(result.get('critical_issues', []))
+                    console.print(f"[dim]Second reviewer found {issue_count} issue(s)[/dim]")
+                else:
+                    console.print("[green]✓ Round 2: Second reviewer finds analysis acceptable[/green]")
             
             # Generate follow-up questions if this is the final round with issues
             suggested_questions = []

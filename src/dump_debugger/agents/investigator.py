@@ -26,6 +26,9 @@ class InvestigatorAgent:
         task = state['current_task']
         console.print(f"\n[cyan]🔍 Investigating:[/cyan] {task}")
         
+        # Track heals in THIS investigation (not cumulative)
+        heals_at_start = self.healer.heal_count
+        
         from langchain_core.messages import HumanMessage, SystemMessage
         from dump_debugger.expert_knowledge import (
             get_efficient_commands_for_hypothesis,
@@ -625,10 +628,10 @@ Return ONLY valid JSON in this exact format:
             if len(all_commands) > 30:
                 all_commands = all_commands[-30:]
         
-        # Log healing stats if any heals occurred
-        heal_stats = self.healer.get_stats()
-        if heal_stats['successful_heals'] > 0:
-            console.print(f"[dim cyan]🔧 Healed {heal_stats['successful_heals']} failed command(s) during investigation[/dim cyan]")
+        # Log healing stats if any heals occurred IN THIS INVESTIGATION (not cumulative)
+        heals_in_this_investigation = self.healer.heal_count - heals_at_start
+        if heals_in_this_investigation > 0:
+            console.print(f"[dim cyan]🔧 Healed {heals_in_this_investigation} failed command(s) during investigation[/dim cyan]")
         
         return {
             'evidence_inventory': inventory,

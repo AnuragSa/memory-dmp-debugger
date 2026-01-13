@@ -366,9 +366,19 @@ Return JSON:
                 break  # Move to next command
         
         # Evaluate results
+        # CRITICAL: Include evidence from ALL previous hypothesis tests, not just current test
+        # This prevents rejecting correct hypotheses when new evidence doesn't show the issue
+        # but earlier evidence clearly identified it
+        all_evidence = []
+        for prev_test in state['hypothesis_tests']:
+            all_evidence.extend(prev_test.get('evidence', []))
+        all_evidence.extend(evidence_collected)  # Add current evidence
+        
+        console.print(f"[dim]Evaluating with {len(all_evidence)} total pieces of evidence ({len(evidence_collected)} from current test, {len(all_evidence) - len(evidence_collected)} from previous tests)[/dim]")
+        
         evaluation = self._evaluate_test_results(
             current_test,
-            evidence_collected
+            all_evidence  # Pass ALL evidence, not just current test
         )
         
         # Update test with results
@@ -576,22 +586,30 @@ HYPOTHESIS: {hypothesis}
 EXPECTED IF CONFIRMED: {expected_confirmed}
 EXPECTED IF REJECTED: {expected_rejected}
 
-ACTUAL EVIDENCE:
+ACTUAL EVIDENCE (from current test AND previous tests):
 {evidence_text}
+
+CRITICAL EVALUATION GUIDELINES:
+1. Consider ALL evidence provided, not just the most recent commands
+2. If EARLIER evidence clearly showed the problem (e.g., stack traces showing lock contention),
+   but CURRENT evidence doesn't show it (timing issue), the hypothesis can still be CONFIRMED
+3. Look for evidence that DIRECTLY supports or contradicts the hypothesis
+4. Don't reject a hypothesis just because current evidence is neutral - check ALL evidence
 
 Based on the actual output, determine:
 1. Does the evidence CONFIRM the hypothesis? (matches expected_confirmed)
-2. Does the evidence REJECT the hypothesis? (matches expected_rejected)
+2. Does the evidence REJECT the hypothesis? (matches expected_rejected)  
 3. Is the evidence INCONCLUSIVE? (unclear or need more data)
 
 Return JSON:
 {{
     "result": "confirmed|rejected|inconclusive",
-    "reasoning": "Detailed explanation of why you reached this conclusion",
+    "reasoning": "Detailed explanation of why you reached this conclusion, citing SPECIFIC evidence",
     "key_findings": ["Finding 1", "Finding 2"]
 }}
 
-Be decisive - if evidence clearly points one way, don't say inconclusive."""
+Be decisive - if evidence clearly points one way, don't say inconclusive.
+If earlier evidence showed the problem but current evidence is neutral, that's still CONFIRMED."""
         
         # Use message format with explicit system/user split
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -699,9 +717,24 @@ Keep it focused - 3-5 tasks maximum. Be surgical, not exploratory."""
         evidence_parts = []
         for e in recent_evidence:
             cmd = e.get('command', '')
-            output = e.get('output', '')
-            truncated = output[:200] if len(output) > 200 else output
-            evidence_parts.append(f"{cmd}: {truncated}")
+            
+            # CRITICAL: Use analyzer summary if available (contains the actual diagnosis)
+            # Don't truncate raw output to 200 chars - that loses all critical information!
+            if e.get('summary'):
+                # Use the analyzer's summary - this is the key diagnostic information
+                output = f"[Analyzer Summary]\n{e.get('summary')}"
+                
+                # Add key findings if available
+                key_findings = e.get('key_findings', [])
+                if key_findings:
+                    output += "\n\nKey Findings:\n" + "\n".join(f"- {f}" for f in key_findings[:5])
+            else:
+                # Fallback to raw output, but use more context (not just 200 chars)
+                output = e.get('output', '')
+                if len(output) > 5000:
+                    output = output[:5000] + f"\n\n[... truncated {len(output) - 5000} chars ...]"
+            
+            evidence_parts.append(f"{cmd}:\n{output}")
         
         if len(evidence_list) > MAX_EVIDENCE_ITEMS:
             evidence_parts.insert(0, f"[Last {MAX_EVIDENCE_ITEMS} of {len(evidence_list)} items]")
@@ -810,9 +843,23 @@ Learn from the rejected hypothesis - what did the evidence actually show?"""
         evidence_parts = []
         for e in recent_evidence:
             cmd = e.get('command', '')
-            output = e.get('output', '')
-            truncated = output[:200] if len(output) > 200 else output
-            evidence_parts.append(f"{cmd}: {truncated}")
+            
+            # CRITICAL: Use analyzer summary if available (contains the actual diagnosis)
+            if e.get('summary'):
+                # Use the analyzer's summary - this is the key diagnostic information
+                output = f"[Analyzer Summary]\n{e.get('summary')}"
+                
+                # Add key findings if available
+                key_findings = e.get('key_findings', [])
+                if key_findings:
+                    output += "\n\nKey Findings:\n" + "\n".join(f"- {f}" for f in key_findings[:5])
+            else:
+                # Fallback to raw output, but use more context (not just 200 chars)
+                output = e.get('output', '')
+                if len(output) > 5000:
+                    output = output[:5000] + f"\n\n[... truncated {len(output) - 5000} chars ...]"
+            
+            evidence_parts.append(f"{cmd}:\n{output}")
             
             # Track failures
             if e.get('failed') or 'Error:' in output or 'Unable to bind' in output:

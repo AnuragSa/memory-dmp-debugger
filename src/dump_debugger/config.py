@@ -18,9 +18,9 @@ class Settings(BaseSettings):
     )
 
     # LLM Configuration
-    llm_provider: Literal["openai", "anthropic", "azure"] = Field(
+    llm_provider: Literal["openai", "anthropic", "azure", "ollama"] = Field(
         default="openai",
-        description="LLM provider to use (openai, anthropic, azure for both Azure OpenAI and Azure Claude)"
+        description="LLM provider to use (openai, anthropic, azure, ollama)"
     )
     
     openai_api_key: str | None = Field(default=None, description="OpenAI API key")
@@ -77,6 +77,28 @@ class Settings(BaseSettings):
     cloud_llm_provider: Literal["openai", "anthropic", "azure"] = Field(
         default="azure",
         description="Cloud LLM provider for complex tasks"
+    )
+    
+    # Privacy & Security
+    local_only_mode: bool = Field(
+        default=False,
+        description="SECURITY: Hard-disable all cloud LLM calls - nothing leaves the machine. Requires local LLM (Ollama) to be configured."
+    )
+    enable_redaction_audit: bool = Field(
+        default=False,
+        description="Enable audit logging for data redaction (logs what was redacted before cloud calls). Off by default."
+    )
+    show_redacted_values: bool = Field(
+        default=False,
+        description="CAUTION: Show actual redacted values in audit log (for debugging false positives). Security risk - off by default."
+    )
+    redaction_patterns_path: str | None = Field(
+        default=None,
+        description="Path to custom redaction patterns file (Python module). Default: .redaction/custom_patterns.py"
+    )
+    current_session_id: str | None = Field(
+        default=None,
+        description="Runtime: Current analysis session ID for audit logging. Set automatically by workflow."
     )
 
     # Debugger Configuration
