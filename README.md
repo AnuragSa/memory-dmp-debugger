@@ -2,6 +2,44 @@
 
 An AI-powered memory dump analyzer that uses hypothesis-driven investigation with LangGraph and WinDbg to automatically diagnose crashes, hangs, and memory issues.
 
+## Table of Contents
+
+1. [Documentation](#documentation)
+2. [Features](#features)
+3. [How It Works](#how-it-works)
+4. [Quality Assurance](#quality-assurance)
+5. [Why Hypothesis-Driven?](#why-hypothesis-driven)
+6. [Interactive Mode](#interactive-mode)
+   - [Quick Start](#quick-start)
+   - [How It Works](#how-it-works-1)
+   - [Special Commands](#special-commands)
+   - [Session Management](#session-management)
+   - [Example Session](#example-session)
+   - [Example Questions](#example-questions)
+   - [Report Integration](#report-integration)
+7. [Known Patterns](#known-patterns)
+8. [Security & Data Protection](#security--data-protection)
+   - [Intelligent Redaction System](#intelligent-redaction-system)
+9. [Architecture](#architecture)
+10. [Prerequisites](#prerequisites)
+11. [Installation](#installation)
+    - [Configuration Options](#configuration-options)
+12. [Usage](#usage)
+    - [Session Management](#session-management-1)
+13. [Evidence Management](#evidence-management)
+    - [Automatic Evidence Storage](#automatic-evidence-storage)
+    - [Benefits](#benefits)
+    - [Configuration](#configuration)
+14. [Example Output](#example-output)
+    - [Console Output](#console-output)
+    - [Generated Report](#generated-report-example)
+15. [Performance](#performance)
+16. [Project Structure](#project-structure)
+17. [Development](#development)
+18. [License](#license)
+
+---
+
 ## Documentation
 
 - Setup and configuration: `docs/SETUP.md`

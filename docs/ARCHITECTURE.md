@@ -2,6 +2,46 @@
 
 This document describes the project's architecture: the hypothesis-driven workflow, pattern knowledge base, evidence management, specialized analyzers, quality review system, iterative reasoning, and interactive mode.
 
+## Table of Contents
+
+1. [High-Level Flow](#high-level-flow)
+2. [Expert / Hypothesis-Driven Workflow](#expert--hypothesis-driven-workflow)
+3. [Iterative Reasoning Feedback Loop](#iterative-reasoning-feedback-loop)
+   - [The Problem](#the-problem)
+   - [The Solution](#the-solution)
+   - [Implementation](#implementation)
+   - [Workflow Example](#workflow-example)
+   - [Console Output](#console-output)
+4. [Quality Review System](#quality-review-system)
+   - [Critic Agent](#critic-agent-temperature-05)
+   - [Critique Loop](#critique-loop-2-rounds-maximum)
+   - [Follow-Up Questions](#follow-up-questions)
+5. [Agent Architecture](#agent-architecture)
+   - [Core Agents](#core-agents)
+   - [Pattern Knowledge System](#pattern-knowledge-system)
+   - [Temperature Strategy](#temperature-strategy)
+   - [Stateless Pattern](#stateless-pattern)
+6. [Specialized Analyzers](#specialized-analyzers)
+   - [Tiers](#tiers)
+   - [Routing](#routing)
+7. [Evidence Management](#evidence-management)
+   - [Key Behaviors](#key-behaviors)
+   - [Session Structure](#session-structure)
+8. [Interactive Mode](#interactive-mode)
+   - [Flow](#flow)
+   - [Command Deduplication](#command-deduplication)
+   - [Atomic Thread Commands](#atomic-thread-commands)
+   - [Iteration Safeguards](#iteration-safeguards)
+   - [Critical Thinking in Chat](#critical-thinking-in-chat)
+9. [Token Tracking](#token-tracking)
+10. [Key Modules (Orientation)](#key-modules-orientation)
+11. [Data Redaction](#data-redaction)
+12. [Extending the System](#extending-the-system)
+    - [Add a New Analyzer](#add-a-new-analyzer)
+    - [Add a New Agent](#add-a-new-agent)
+
+---
+
 ## High-Level Flow
 
 The tool runs a persistent WinDbg/CDB session against a dump and iteratively collects evidence to answer the user's issue.
