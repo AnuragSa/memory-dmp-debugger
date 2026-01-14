@@ -248,7 +248,7 @@ class EvidenceRetriever:
         keywords = [w for w in words if len(w) > 3 and w not in stopwords]
         return keywords
     
-    def _keyword_score(self, text: str, keywords: list[str]) -> int:
+    def _keyword_score(self, text: str | None, keywords: list[str]) -> int:
         """Score text by keyword matches.
         
         Args:
@@ -258,7 +258,9 @@ class EvidenceRetriever:
         Returns:
             Match score
         """
-        text_lower = text.lower()
+        if not text:
+            return 0
+        text_lower = str(text).lower()
         score = 0
         for keyword in keywords:
             if keyword in text_lower:

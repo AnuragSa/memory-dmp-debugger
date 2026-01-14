@@ -7,7 +7,7 @@ from langchain_core.language_models import BaseChatModel
 from rich.console import Console
 
 from dump_debugger.config import settings
-from dump_debugger.llm import get_llm
+from dump_debugger.llm import get_llm, get_llm_for_provider
 
 console = Console()
 
@@ -26,37 +26,38 @@ class TaskComplexity(Enum):
 
 
 class LLMRouter:
-    """Routes LLM requests to appropriate tier based on task complexity."""
+    """Routes LLM requests to appropriate tier based on task complexity.
+    
+    When USE_TIERED_LLM=true:
+    - Simple tasks use Ollama (local)
+    - Complex tasks use LLM_PROVIDER (cloud or local)
+    """
     
     def __init__(self):
         """Initialize the LLM router."""
-        self.use_tiered = settings.use_tiered_llm and settings.use_local_llm
+        # Tiered routing is enabled when USE_TIERED_LLM=true
+        # For tiered to make sense, LLM_PROVIDER should be a cloud provider
+        self.use_tiered = settings.use_tiered_llm
         self._local_llm: BaseChatModel | None = None
-        self._cloud_llm: BaseChatModel | None = None
+        self._complex_llm: BaseChatModel | None = None
     
     @property
     def local_llm(self) -> BaseChatModel:
-        """Get or create local LLM instance."""
+        """Get or create local LLM instance (Ollama for simple tasks)."""
         if self._local_llm is None:
-            # Temporarily override provider to get Ollama instance
-            original_provider = settings.llm_provider
-            settings.llm_provider = "ollama"
-            self._local_llm = get_llm(temperature=0.0)
-            settings.llm_provider = original_provider
+            # Use explicit provider request to avoid mutating global settings
+            self._local_llm = get_llm_for_provider("ollama", temperature=0.0)
             console.print(f"[dim]🤖 Initialized local LLM: {settings.local_llm_model}[/dim]")
         return self._local_llm
     
     @property
-    def cloud_llm(self) -> BaseChatModel:
-        """Get or create cloud LLM instance."""
-        if self._cloud_llm is None:
-            # Use configured cloud provider
-            original_provider = settings.llm_provider
-            settings.llm_provider = settings.cloud_llm_provider
-            self._cloud_llm = get_llm(temperature=0.0)
-            settings.llm_provider = original_provider
-            console.print(f"[dim]☁️ Initialized cloud LLM: {settings.cloud_llm_provider}[/dim]")
-        return self._cloud_llm
+    def complex_llm(self) -> BaseChatModel:
+        """Get or create LLM for complex tasks (uses LLM_PROVIDER)."""
+        if self._complex_llm is None:
+            # Use LLM_PROVIDER for complex tasks
+            self._complex_llm = get_llm_for_provider(settings.llm_provider, temperature=0.0)
+            console.print(f"[dim]☁️ Initialized complex task LLM: {settings.llm_provider}[/dim]")
+        return self._complex_llm
     
     def get_llm_for_task(
         self, 
@@ -96,8 +97,8 @@ class LLMRouter:
             console.print(f"[dim]🤖 LLM: local ({settings.local_llm_model}) [forced][/dim]")
             return self.local_llm
         elif force_tier == LLMTier.CLOUD:
-            console.print(f"[dim]☁️ LLM: cloud ({settings.cloud_llm_provider}) [forced][/dim]")
-            return self.cloud_llm
+            console.print(f"[dim]☁️ LLM: {settings.llm_provider} [forced][/dim]")
+            return self.complex_llm
         
         # Route based on complexity
         if complexity == TaskComplexity.SIMPLE:
@@ -105,17 +106,17 @@ class LLMRouter:
             console.print(f"[dim]🤖 LLM: local ({settings.local_llm_model}) [simple task][/dim]")
             return self.local_llm
         elif complexity == TaskComplexity.MODERATE:
-            # Use local LLM for moderate tasks if available, otherwise cloud
+            # Use local LLM for moderate tasks if available, otherwise complex LLM
             try:
                 console.print(f"[dim]🤖 LLM: local ({settings.local_llm_model}) [moderate task][/dim]")
                 return self.local_llm
             except Exception:
-                console.print(f"[dim]☁️ LLM: cloud ({settings.cloud_llm_provider}) [moderate task, local failed][/dim]")
-                return self.cloud_llm
+                console.print(f"[dim]☁️ LLM: {settings.llm_provider} [moderate task, local failed][/dim]")
+                return self.complex_llm
         else:  # COMPLEX
-            # Always use cloud LLM for complex reasoning
-            console.print(f"[dim]☁️ LLM: cloud ({settings.cloud_llm_provider}) [complex task][/dim]")
-            return self.cloud_llm
+            # Use LLM_PROVIDER for complex reasoning
+            console.print(f"[dim]☁️ LLM: {settings.llm_provider} [complex task][/dim]")
+            return self.complex_llm
     
     def get_llm_for_command(self, command: str) -> tuple[BaseChatModel, TaskComplexity]:
         """Get appropriate LLM based on debugger command type.

@@ -259,7 +259,10 @@ When using cloud LLM providers, the tool **attempts** to protect sensitive data 
 - Use `--show-redacted-values` to include actual sensitive values in audit log (for debugging only - security risk!)
 
 **Local-Only Mode:**
-Set `LOCAL_ONLY_MODE=true` in `.env` to prevent all cloud LLM calls and process dumps entirely locally with Ollama.
+Use `--local-only` CLI flag or set `LOCAL_ONLY_MODE=true` in `.env` to prevent all cloud calls (LLM and embeddings). This is a security feature for air-gapped environments:
+- Forces Ollama to be used for all LLM tasks
+- Disables cloud embeddings (keyword search is used instead)
+- Shows a warning banner when active
 
 **Custom Patterns:**
 Add domain-specific redaction patterns without modifying source code:

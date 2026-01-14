@@ -89,9 +89,11 @@ class DebuggerWrapper:
             self.evidence_store = EvidenceStore(session_dir)
             self.evidence_analyzer = EvidenceAnalyzer(get_llm())
             
-            # Initialize embeddings client if enabled
-            if settings.use_embeddings:
+            # Initialize embeddings client if enabled (disabled in local-only mode)
+            if settings.use_embeddings and not settings.local_only_mode:
                 self.embeddings_client = self._init_embeddings_client()
+            elif settings.local_only_mode:
+                console.print("[dim]🔒 LOCAL-ONLY MODE: Embeddings disabled, using keyword search[/dim]")
 
         if not self.dump_path.exists():
             raise FileNotFoundError(f"Dump file not found: {dump_path}")

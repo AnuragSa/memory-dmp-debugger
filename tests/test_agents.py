@@ -1,19 +1,17 @@
-"""Tests for agent implementations."""
+"""Smoke tests for agent exports.
 
-import pytest
-from dump_debugger.agents import PlannerAgent, AnalyzerAgent
-from dump_debugger.state import AnalysisState
+These tests only verify that the expected agent classes are available for import.
+They intentionally avoid instantiation to keep the suite lightweight.
+"""
 
-
-def test_planner_agent_structure():
-    """Test that planner agent can be instantiated."""
-    # This would require API keys to actually test
-    # Placeholder for structure
-    pass
+from dump_debugger.agents import PlannerAgentV2, InvestigatorAgent
 
 
-def test_analyzer_agent_structure():
-    """Test that analyzer agent can be instantiated."""
-    # This would require API keys to actually test
-    # Placeholder for structure
-    pass
+def test_planner_agent_exported():
+    """PlannerAgentV2 should be exposed via the agents package."""
+    assert PlannerAgentV2 is not None
+
+
+def test_investigator_agent_exported():
+    """InvestigatorAgent should be exposed via the agents package."""
+    assert InvestigatorAgent is not None

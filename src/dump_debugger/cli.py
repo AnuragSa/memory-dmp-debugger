@@ -89,18 +89,25 @@ def analyze(
     """
     try:
         # Apply security flags to config
-        if local_only:
-            from dump_debugger.config import settings
+        from dump_debugger.config import settings
+        
+        # Compute effective local-only mode (CLI overrides env)
+        effective_local_only = local_only or settings.local_only_mode
+        
+        if effective_local_only:
             settings.local_only_mode = True
-            console.print("[green]🔒 LOCAL-ONLY MODE enabled - all processing stays on your machine[/green]")
+            # Warn if cloud provider was configured but will be overridden
+            if settings.llm_provider != "ollama":
+                console.print(
+                    f"[yellow]⚠️  LOCAL-ONLY MODE: LLM_PROVIDER was '{settings.llm_provider}' but Ollama will be used instead[/yellow]"
+                )
+            console.print("[green]🔒 LOCAL-ONLY MODE enabled - all processing stays on your machine (no cloud calls)[/green]")
         
         if audit_redaction:
-            from dump_debugger.config import settings
             settings.enable_redaction_audit = True
             console.print("[cyan]📋 Redaction audit logging enabled[/cyan]")
         
         if show_redacted_values:
-            from dump_debugger.config import settings
             settings.show_redacted_values = True
             console.print("[bold red]⚠️  WARNING: Showing redacted values in audit log (security risk!)[/bold red]")
         

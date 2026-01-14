@@ -63,7 +63,7 @@ def _display_security_banner():
         # Cloud mode - show warnings and redaction status
         provider_name = settings.llm_provider.upper()
         if settings.use_tiered_llm:
-            provider_name = f"{settings.cloud_llm_provider.upper()} (tiered with local)"
+            provider_name = f"{settings.llm_provider.upper()} (tiered with Ollama)"
         
         panel_content = (
             f"[bold yellow]⚠️  CLOUD MODE - {provider_name}[/bold yellow]\n\n"

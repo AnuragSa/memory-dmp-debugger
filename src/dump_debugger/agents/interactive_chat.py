@@ -200,8 +200,16 @@ class InteractiveChatAgent:
         
         # Use semantic search if available, otherwise keyword matching
         if self.evidence_retriever:
-            console.print("[dim]Using semantic search for evidence...[/dim]")
-            use_embeddings = settings.use_embeddings and self.evidence_retriever.embeddings_client is not None
+            # In local-only mode, always use keyword search (no cloud embeddings)
+            use_embeddings = (
+                settings.use_embeddings 
+                and self.evidence_retriever.embeddings_client is not None
+                and not settings.local_only_mode
+            )
+            if use_embeddings:
+                console.print("[dim]Using semantic search for evidence...[/dim]")
+            else:
+                console.print("[dim]Using keyword search for evidence...[/dim]")
             relevant = self.evidence_retriever.find_relevant_evidence(
                 question=question,
                 evidence_inventory=context['evidence_inventory'],

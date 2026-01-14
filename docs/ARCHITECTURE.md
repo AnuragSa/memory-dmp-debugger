@@ -383,7 +383,7 @@ When using cloud LLM providers, the `DataRedactor` component attempts to protect
 **Integration Points:**
 - Wraps all debugger command outputs before sending to cloud LLMs
 - Applied at evidence collection time in `debugger.py`
-- Disabled entirely in `LOCAL_ONLY_MODE`
+- Disabled entirely in `LOCAL_ONLY_MODE` (both CLI `--local-only` and env var)
 
 **Extensibility:**
 Add custom redaction patterns without modifying source code:

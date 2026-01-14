@@ -58,6 +58,12 @@ class PatternChecker:
         if not self.patterns:
             return []
         
+        # Check for local-only mode - use keyword fallback directly
+        from dump_debugger.config import settings
+        if settings.local_only_mode:
+            console.print("[dim]🔒 LOCAL-ONLY MODE: Using keyword matching for patterns[/dim]")
+            return self._keyword_fallback(issue_description)
+        
         try:
             # Lazy load embeddings model
             if self.embeddings_model is None:
