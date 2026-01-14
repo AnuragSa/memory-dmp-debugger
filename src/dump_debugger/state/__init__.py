@@ -55,6 +55,7 @@ class AnalysisState(TypedDict):
     issue_description: str
     dump_type: str  # "user" or "kernel"
     supports_dx: bool  # Whether data model commands are available
+    thread_info: dict[str, Any] | None  # Cached !threads output from startup
     
     # Session management (NEW - for evidence isolation)
     session_dir: str  # Path to session directory for this analysis

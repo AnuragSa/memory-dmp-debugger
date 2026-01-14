@@ -121,15 +121,38 @@ class ThreadsAnalyzer(BaseAnalyzer):
         lines = output.split('\n')
         
         # Pattern for thread line (flexible to handle variations)
-        # Example: "  0    1 4d8c 000001f2a3b4c5d6    2a020 Preemptive  ... 000001f2a3b4d000 0     MTA"
+        # Example: "  0    1 4d8c 000001f2a3b4c5d6    2a020 Preemptive  ... 000001f2a3b4d000 0     MTA (Finalizer)"
+        # The Exception column can contain:
+        # - (Finalizer), (GC), (Threadpool Worker) - special thread types in parens
+        # - System.NullReferenceException - exception type without parens
+        # - (Finalizer) System.Exception - both special and exception
         thread_pattern = re.compile(
             r'^\s*(\d+)\s+(\d+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\w+)\s+'
-            r'([0-9a-fA-F]+:[0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)\s+(\w+)(?:\s+\(([^)]+)\))?'
+            r'([0-9a-fA-F]+:[0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+(\d+)\s+(\w+)(?:\s+(.+))?$'
         )
         
         for line in lines:
             match = thread_pattern.match(line)
             if match:
+                # Parse the exception/special column (group 11) which may contain:
+                # "(Finalizer)", "System.Exception", "(GC) System.Exception", etc.
+                exception_col = match.group(11).strip() if match.group(11) else None
+                special = None
+                exception = None
+                
+                if exception_col:
+                    # Check for parenthesized special designation
+                    special_match = re.match(r'\(([^)]+)\)', exception_col)
+                    if special_match:
+                        special = special_match.group(1)
+                        # Remainder after special designation might be exception
+                        remainder = exception_col[special_match.end():].strip()
+                        if remainder:
+                            exception = remainder
+                    else:
+                        # No parentheses - entire thing is exception type
+                        exception = exception_col
+                
                 thread = {
                     "dbg_id": int(match.group(1)),
                     "managed_id": int(match.group(2)),
@@ -141,7 +164,8 @@ class ThreadsAnalyzer(BaseAnalyzer):
                     "domain": match.group(8),
                     "lock_count": int(match.group(9)),
                     "apartment": match.group(10),
-                    "special": match.group(11) if match.lastindex >= 11 else None,
+                    "special": special,  # e.g., "Finalizer", "GC", "Threadpool Worker"
+                    "exception": exception,  # e.g., "System.NullReferenceException"
                 }
                 threads.append(thread)
         

@@ -104,10 +104,13 @@ Task: "Run '!dumpheap -stat' then '!do' on 3 objects"
 Response: {{"commands": ["!dumpheap -stat", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap -stat followed by !do on 3 objects"}}
 
 Task: "Examine all threads waiting on SyncBlock 470 with !clrstack"
-Response: {{"commands": ["!threads", "~*e !clrstack"], "rationale": "getting threads then examining all stacks to find waiting threads"}}
+Response: {{"commands": ["~*e !clrstack"], "rationale": "examining all thread stacks to find waiting threads"}}
 
 Task: "Run !clrstack on thread 18 (DBG#) which holds the lock"
 Response: {{"commands": ["~18e !clrstack"], "rationale": "examining specific thread 18 stack"}}
+
+Task: "Execute '!clrstack' on several of the 21 threads waiting on the HostedCompiler lock"  
+Response: {{"commands": ["~*e !clrstack"], "rationale": "examining all thread stacks to identify threads waiting on HostedCompiler lock"}}
 """
         else:
             prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.
@@ -207,14 +210,17 @@ Example: If !threads shows "DBG=9, ID=12, OSID=3fc", managed thread 12 is at:
 - OSID 0x3fc: Use ~~[3fc]e !clrstack (bracket gets NO 0x prefix, but we refer to it as "OSID 0x3fc")
 
 STRICT COMMAND SELECTION RULES:
-1. If task explicitly mentions a command (e.g., "Use !do", "Run !clrstack"), use that EXACT command
-2. Do NOT substitute with different commands even if they seem more efficient
-3. If task mentions "!do on objects" or "inspect/examine objects with !do":
-   - Use !dumpheap -type TypeName (WITHOUT -stat) to get actual object addresses
-   - DO NOT use -stat flag when addresses are needed for !do inspection
-   - We'll auto-generate !do commands for the addresses found
-4. Use !dumpheap -stat ONLY when task asks for statistics/counts/summaries, never for object inspection
-5. Follow task intent: finding objects for statistics ≠ finding objects for inspection
+1. If task explicitly mentions a command (e.g., "Execute '!do'", "Run !clrstack"), use that EXACT command
+2. Do NOT add prerequisite steps unless the task explicitly says "then" or "followed by"
+3. Task says "Execute '!do' on objects" → Generate: !do <addr> (with placeholder)
+   DO NOT generate: !dumpheap first (that's a separate task)
+4. Task says "Execute '!clrstack' on threads" → Generate: ~*e !clrstack or ~Xe !clrstack
+   DO NOT generate: !threads first (we already have thread info)
+5. If task mentions "actual objects", "specific objects", or "active objects":
+   - Use placeholder syntax: !do <addr> or !gcroot <addr>
+   - The system will auto-resolve <addr> from previous !dumpheap evidence
+6. Use !dumpheap -stat ONLY when task asks for statistics/counts/summaries, never for object inspection
+7. Follow task intent literally - don't be "helpful" by adding steps
 
 CRITICAL COMMAND SYNTAX RULES:
 1. ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
@@ -684,21 +690,29 @@ Return ONLY valid JSON in this exact format:
                 # Check for specific WinDbg error patterns, not analyzer commentary
                 output_start = output[:300].strip() if output else ""
                 
-                # Only flag as failed if output looks like an actual debugger error
+                # Check if we got substantial output (indicates success even if some warnings present)
+                has_substantial_output = len(output) > 1000
+                
+                # Only flag as failed if output looks like an actual debugger error AND we don't have substantial output
                 failed = (
                     not success or
-                    output.startswith('Error:') or
-                    output.startswith('0:000> Error') or
-                    'Unable to ' in output_start or  # WinDbg errors start with "Unable to"
-                    'Cannot ' in output_start or     # "Cannot load/find/access"
-                    'Syntax error' in output_start or
-                    'Unknown command' in output_start or
-                    'No export' in output_start or
-                    'does not have a valid' in output_start or  # "does not have a valid class field"
-                    'is not a valid' in output_start or         # "is not a valid object"
-                    'Bad address' in output_start or
-                    (len(output) < 50 and ('error' in output.lower() or 'invalid' in output.lower()))
+                    (not has_substantial_output and (
+                        output.startswith('Error:') or
+                        output.startswith('0:000> Error') or
+                        'Unable to ' in output_start or  # WinDbg errors start with "Unable to"
+                        'Cannot ' in output_start or     # "Cannot load/find/access"
+                        'Syntax error' in output_start or
+                        'Unknown command' in output_start or
+                        'No export' in output_start or
+                        'Bad address' in output_start or
+                        (len(output) < 50 and ('error' in output.lower() or 'invalid' in output.lower()))
+                    ))
                 )
+                
+                # Don't treat object inspection failures as command failures
+                # These are expected when cycling through addresses
+                if 'does not have a valid' in output or 'is not a valid object' in output:
+                    failed = False  # Address is invalid, but command syntax was correct
                 
                 if failed and attempt < max_heal_attempts:
                     # Attempt to heal the command

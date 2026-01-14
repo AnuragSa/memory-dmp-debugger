@@ -34,6 +34,43 @@ class HypothesisDrivenAgent:
         self.debugger = debugger
         self.llm = get_llm()
     
+    def _build_thread_reference(self, state: AnalysisState) -> str:
+        """Build thread reference section for LLM prompt.
+        
+        Creates a mapping organized by DBG# (debugger thread index) for easy lookup.
+        When users say 'thread 18', they mean DBG# 18 (used in ~18e commands).
+        """
+        thread_info = state.get('thread_info')
+        if not thread_info:
+            return ""
+        
+        threads = thread_info.get('threads', [])
+        if not threads:
+            return ""
+        
+        # Build compact reference table indexed by DBG#
+        lines = [
+            "\nTHREAD REFERENCE (indexed by DBG#):",
+            "Format: Thread DBG#: Managed ID X, OSID 0xY [special]",
+        ]
+        
+        for t in threads[:30]:  # Limit for hypothesis agent
+            dbg_id = t.get('dbg_id', '')
+            managed_id = t.get('managed_id', '')
+            osid = t.get('osid', '')
+            special = t.get('special', '')
+            
+            if special:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid} ({special})")
+            else:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid}")
+        
+        if len(threads) > 30:
+            lines.append(f"  ... and {len(threads) - 30} more")
+        
+        lines.append("")
+        return "\n".join(lines)
+    
     def form_initial_hypothesis(self, state: AnalysisState) -> dict[str, Any]:
         """Form initial hypothesis from user question and known patterns.
         
@@ -378,7 +415,8 @@ Return JSON:
         
         evaluation = self._evaluate_test_results(
             current_test,
-            all_evidence  # Pass ALL evidence, not just current test
+            all_evidence,  # Pass ALL evidence, not just current test
+            state  # Pass state for thread reference
         )
         
         # Update test with results
@@ -560,13 +598,15 @@ Keep critical details like thread IDs, addresses, lock holders, and wait pattern
     def _evaluate_test_results(
         self,
         test: HypothesisTest,
-        evidence: list[Evidence]
+        evidence: list[Evidence],
+        state: AnalysisState
     ) -> dict[str, Any]:
         """Evaluate whether test results confirm, reject, or are inconclusive.
         
         Args:
             test: The hypothesis test
             evidence: Evidence collected
+            state: Current analysis state (for thread reference)
             
         Returns:
             Evaluation result
@@ -579,13 +619,16 @@ Keep critical details like thread IDs, addresses, lock holders, and wait pattern
         expected_confirmed = str(test.get('expected_confirmed', ''))[:500]
         expected_rejected = str(test.get('expected_rejected', ''))[:500]
         
+        # Build thread reference for user-friendly output
+        thread_reference = self._build_thread_reference(state)
+        
         prompt = f"""Evaluate whether this evidence confirms or rejects the hypothesis.
 
 HYPOTHESIS: {hypothesis}
 
 EXPECTED IF CONFIRMED: {expected_confirmed}
 EXPECTED IF REJECTED: {expected_rejected}
-
+{thread_reference}
 ACTUAL EVIDENCE (from current test AND previous tests):
 {evidence_text}
 

@@ -377,7 +377,7 @@ def get_embeddings(session_id: str | None = None) -> Embeddings:
             match = re.search(r'/deployments/([^/]+)/', azure_endpoint)
             if match:
                 azure_deployment = match.group(1)
-                console.print(f"[dim]Extracted embeddings deployment from endpoint: {azure_deployment}[/dim]")
+                #console.print(f"[dim]Extracted embeddings deployment from endpoint: {azure_deployment}[/dim]")
         
         if not azure_deployment:
             raise ValueError(

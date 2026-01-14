@@ -78,6 +78,9 @@ class DebuggerWrapper:
         # Track current thread context for cache keying
         self._current_thread = None  # Format: "0x1234" or thread index
         
+        # Cached foundational command outputs (captured during initialization)
+        self._cached_threads_output: str | None = None  # !threads output from DAC verification
+        
         # Session tracking for audit logging
         self.session_dir = session_dir
         self.session_id = session_dir.name if session_dir else None
@@ -304,8 +307,9 @@ class DebuggerWrapper:
                     console.print(f"[yellow]  Hint: Run 'lmvm clr' or 'lmvm coreclr' in WinDbg to see exact version needed[/yellow]")
                     raise DebuggerError("DAC version mismatch - analysis cannot proceed")
                 elif "ThreadCount" in verify_output or "Thr" in verify_output or "ID" in verify_output:
-                    # !threads command produced output (thread list)
+                    # !threads command produced output (thread list) - cache it for later use
                     console.print("[green]✓ DAC is compatible and working[/green]")
+                    self._cached_threads_output = verify_output
                 else:
                     console.print(f"[yellow]⚠ DAC verification unclear - continuing with caution[/yellow]")
             else:
@@ -448,6 +452,56 @@ class DebuggerWrapper:
                 if self.show_output:
                     console.print("[dim]Debugger session closed[/dim]")
 
+    def get_thread_info(self) -> dict[str, Any] | None:
+        """Get cached thread information from startup.
+        
+        Returns parsed !threads output that was captured during DAC verification.
+        This provides structured thread data without re-executing the command.
+        
+        Returns:
+            Dictionary with thread information:
+            {
+                "threads": [{"managed_id": 1, "dbg_id": 0, "osid": "4d8c", ...}, ...],
+                "stats": {"ThreadCount": 23, "BackgroundThread": 17, ...},
+                "raw_output": "..."
+            }
+            Returns None if !threads wasn't captured or parsing failed.
+        """
+        if not self._cached_threads_output:
+            # Try to run !threads now if not cached
+            console.print("[dim]Running !threads for thread info...[/dim]")
+            try:
+                result = self.execute_command("!threads")
+                output = result.get('output', '')
+                if output and "ThreadCount" in output:
+                    self._cached_threads_output = output
+            except Exception as e:
+                console.print(f"[yellow]⚠ Could not get thread info: {e}[/yellow]")
+                return None
+        
+        if not self._cached_threads_output:
+            return None
+        
+        try:
+            from dump_debugger.analyzers.threads import ThreadsAnalyzer
+            
+            analyzer = ThreadsAnalyzer()
+            analysis = analyzer.analyze("!threads", self._cached_threads_output)
+            
+            if analysis.success:
+                return {
+                    "threads": analysis.structured_data.get("threads", []),
+                    "stats": analysis.structured_data.get("stats", {}),
+                    "notable_threads": analysis.structured_data.get("notable_threads", {}),
+                    "raw_output": self._cached_threads_output,
+                }
+            else:
+                console.print(f"[yellow]⚠ Thread analysis failed: {analysis.error}[/yellow]")
+                return None
+        except Exception as e:
+            console.print(f"[yellow]⚠ Could not parse thread info: {e}[/yellow]")
+            return None
+
     def execute_command(self, command: str, timeout: int | None = None) -> dict[str, Any]:
         """Execute a debugger command in the persistent session and return the result.
         
@@ -467,6 +521,56 @@ class DebuggerWrapper:
             timeout = settings.command_timeout
 
         command_stripped = command.strip()
+        
+        # Check if this is !threads and we have cached output from startup
+        if command_stripped == "!threads" and self._cached_threads_output:
+            # Check if already stored in evidence store
+            if self.evidence_store:
+                cached_evidence_id = self.evidence_store.find_by_command(command_stripped, current_thread=self._current_thread)
+                if cached_evidence_id:
+                    # Already in evidence store, return with evidence_id
+                    if self.show_output:
+                        console.print(f"[dim]✓ Using cached !threads from evidence store[/dim]")
+                    output = self.evidence_store.retrieve_evidence(cached_evidence_id)
+                    return {
+                        "command": command,
+                        "output": output,
+                        "parsed": self._parse_output(command, output),
+                        "success": True,
+                        "error": None,
+                        "cached": True,
+                        "evidence_id": cached_evidence_id
+                    }
+                else:
+                    # Not in evidence store yet, store it now
+                    if self.show_output:
+                        console.print(f"[dim]✓ Using cached !threads from startup (storing in evidence store)[/dim]")
+                    evidence_id = self.evidence_store.store_evidence(
+                        command=command_stripped,
+                        output=self._cached_threads_output,
+                        current_thread=self._current_thread
+                    )
+                    return {
+                        "command": command,
+                        "output": self._cached_threads_output,
+                        "parsed": self._parse_output(command, self._cached_threads_output),
+                        "success": True,
+                        "error": None,
+                        "cached": True,
+                        "evidence_id": evidence_id
+                    }
+            else:
+                # No evidence store, just return cached output
+                if self.show_output:
+                    console.print(f"[dim]✓ Using cached !threads from startup[/dim]")
+                return {
+                    "command": command,
+                    "output": self._cached_threads_output,
+                    "parsed": self._parse_output(command, self._cached_threads_output),
+                    "success": True,
+                    "error": None,
+                    "cached": True
+                }
 
         try:
             # Check cache first - dumps are static, commands return same output

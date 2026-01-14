@@ -17,6 +17,44 @@ class ReportWriterAgentV2:
     def __init__(self):
         self.llm = get_llm(temperature=0.2)
     
+    def _build_thread_reference(self, state: AnalysisState) -> str:
+        """Build thread reference section for LLM prompt.
+        
+        Creates a mapping organized by DBG# (debugger thread index) for easy lookup.
+        When users say 'thread 18', they mean DBG# 18 (used in ~18e commands).
+        """
+        thread_info = state.get('thread_info')
+        if not thread_info:
+            return ""
+        
+        threads = thread_info.get('threads', [])
+        if not threads:
+            return ""
+        
+        # Build compact reference table indexed by DBG#
+        lines = [
+            "\n## THREAD REFERENCE",
+            "Format: Thread DBG#: Managed ID X, OSID 0xY [special]",
+            "DBG# is the number used in ~Xe commands (e.g., ~18e !clrstack)",
+        ]
+        
+        for t in threads[:50]:  # Limit to 50 threads for prompt size
+            dbg_id = t.get('dbg_id', '')
+            managed_id = t.get('managed_id', '')
+            osid = t.get('osid', '')
+            special = t.get('special', '')
+            
+            if special:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid} ({special})")
+            else:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid}")
+        
+        if len(threads) > 50:
+            lines.append(f"  ... and {len(threads) - 50} more threads")
+        
+        lines.append("")
+        return "\n".join(lines)
+    
     def _format_analysis_text(self, text: str) -> str:
         """Format analysis text with proper bullet points for readability."""
         import re
@@ -349,6 +387,9 @@ For interactive analysis, you can ask specific questions about the dump data tha
         console.print(f"[dim]Prepared report evidence: {len(evidence_text)} chars (~{len(evidence_text)//4} tokens)[/dim]")
         conclusions_text = "\n".join(f"- {c}" for c in conclusions)
         
+        # Build thread reference section for user-friendly thread identification
+        thread_reference = self._build_thread_reference(state)
+        
         context = f"""Generate a comprehensive crash dump analysis report.
 
 ## INVESTIGATION SUMMARY
@@ -359,7 +400,7 @@ For interactive analysis, you can ask specific questions about the dump data tha
 
 ## HYPOTHESIS TESTING PROCESS
 {test_history_text}
-
+{thread_reference}
 ## KEY EVIDENCE
 {evidence_text}
 
