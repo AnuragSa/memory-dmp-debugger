@@ -861,6 +861,10 @@ def run_analysis(
     
     # Create session directory for this analysis
     from dump_debugger.session import SessionManager
+    from dump_debugger.utils.thread_registry import get_thread_registry
+    
+    # Clear thread registry from any previous session
+    get_thread_registry().clear()
     
     session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
     session_dir = session_manager.create_session(dump_path)

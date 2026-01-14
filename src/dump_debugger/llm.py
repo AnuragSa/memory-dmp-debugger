@@ -33,16 +33,13 @@ except ImportError:
     AZURE_AI_AVAILABLE = False
 
 from dump_debugger.config import settings
-from dump_debugger.security.redactor import DataRedactor, load_custom_patterns
+from dump_debugger.security.redactor import DataRedactor, load_custom_patterns, RedactionEmbeddingsWrapper, get_shared_redactor
 from dump_debugger.token_tracker import create_callback
 
 console = Console()
 
 # LLM instance cache to avoid creating duplicates
 _llm_cache: dict[str, BaseChatModel] = {}
-
-# Global redactor instance (initialized on first use)
-_redactor: DataRedactor | None = None
 
 
 def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChatModel:
@@ -322,14 +319,20 @@ def get_structured_llm(temperature: float = 0.0) -> BaseChatModel:
     return llm
 
 
-def get_embeddings() -> Embeddings:
+def get_embeddings(session_id: str | None = None) -> Embeddings:
     """Get embeddings model based on configured embeddings provider.
     
     In LOCAL_ONLY_MODE, embeddings are disabled (raises ValueError) to prevent
     any data from leaving the machine. Callers should fall back to keyword search.
     
+    SECURITY: Cloud embeddings (OpenAI, Azure) are wrapped with RedactionEmbeddingsWrapper
+    to ensure sensitive data is redacted before being sent to the embedding API.
+    
+    Args:
+        session_id: Session ID for audit logging (optional)
+    
     Returns:
-        Embeddings instance for semantic search
+        Embeddings instance for semantic search (wrapped with redaction for cloud providers)
         
     Raises:
         ValueError: If local-only mode is enabled, provider doesn't support embeddings,
@@ -346,22 +349,61 @@ def get_embeddings() -> Embeddings:
     provider = settings.embeddings_provider.lower() if settings.embeddings_provider else settings.llm_provider.lower()
     
     if provider == "openai":
-        return OpenAIEmbeddings(
-            model="text-embedding-3-small",
+        embeddings = OpenAIEmbeddings(
+            model=settings.embeddings_model,
             api_key=settings.openai_api_key
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "openai", session_id)
     
     elif provider == "azure":
-        # For Azure, embeddings require a separate deployment
-        # Skip if not configured - will fall back to keyword matching
-        raise ValueError(
-            "Azure embeddings not configured. "
-            "Deploy 'text-embedding-3-small' in Azure OpenAI and set AZURE_EMBEDDINGS_DEPLOYMENT env var. "
-            "Falling back to keyword matching."
+        # Azure embeddings require a separate deployment
+        # Check if Azure embeddings are configured
+        azure_endpoint = settings.azure_embeddings_endpoint or settings.azure_openai_endpoint
+        azure_api_key = settings.azure_embeddings_api_key or settings.azure_openai_api_key
+        azure_deployment = settings.azure_embeddings_deployment
+        
+        if not azure_endpoint or not azure_api_key:
+            raise ValueError(
+                "Azure embeddings not configured. "
+                "Set AZURE_EMBEDDINGS_ENDPOINT and AZURE_EMBEDDINGS_API_KEY in .env. "
+                "Falling back to keyword matching."
+            )
+        
+        # Try to extract deployment from endpoint URL if not explicitly set
+        # Azure AI Foundry format: https://<instance>.cognitiveservices.azure.com/openai/deployments/<deployment>/embeddings
+        if not azure_deployment:
+            import re
+            match = re.search(r'/deployments/([^/]+)/', azure_endpoint)
+            if match:
+                azure_deployment = match.group(1)
+                console.print(f"[dim]Extracted embeddings deployment from endpoint: {azure_deployment}[/dim]")
+        
+        if not azure_deployment:
+            raise ValueError(
+                "Azure embeddings deployment not configured. "
+                "Set AZURE_EMBEDDINGS_DEPLOYMENT env var to your deployment name. "
+                "Falling back to keyword matching."
+            )
+        
+        # Extract base endpoint (without the deployment path) for AzureOpenAIEmbeddings
+        # The LangChain AzureOpenAIEmbeddings expects the base URL, not the full path
+        base_endpoint = azure_endpoint
+        if '/openai/deployments/' in azure_endpoint:
+            # Azure AI Foundry full URL - extract base
+            base_endpoint = azure_endpoint.split('/openai/deployments/')[0]
+        
+        embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=azure_deployment,
+            azure_endpoint=base_endpoint,
+            api_key=azure_api_key,
+            api_version=settings.azure_openai_api_version,
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "azure", session_id)
     
     elif provider == "ollama":
-        # Ollama with local embeddings model
+        # Ollama with local embeddings model - no redaction needed (local)
         return OllamaEmbeddings(
             model=settings.local_embeddings_model or "nomic-embed-text",
             base_url=settings.local_llm_base_url
@@ -369,13 +411,15 @@ def get_embeddings() -> Embeddings:
     
     elif provider == "anthropic":
         # Anthropic doesn't provide embeddings, fall back to OpenAI
-        console.print("[yellow]⚠ Anthropic doesn't provide embeddings, using OpenAI text-embedding-3-small[/yellow]")
+        console.print(f"[yellow]⚠ Anthropic doesn't provide embeddings, using OpenAI {settings.embeddings_model}[/yellow]")
         if not settings.openai_api_key:
             raise ValueError("OpenAI API key required for embeddings when using Anthropic LLM")
-        return OpenAIEmbeddings(
-            model="text-embedding-3-small",
+        embeddings = OpenAIEmbeddings(
+            model=settings.embeddings_model,
             api_key=settings.openai_api_key
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "openai-for-anthropic", session_id)
     
     else:
         raise ValueError(f"Embeddings not supported for provider: {provider}")
@@ -408,38 +452,13 @@ class RedactionLLMWrapper(BaseChatModel):
         self._total_redactions = 0
     
     def _get_redactor(self) -> DataRedactor:
-        """Get or create the global redactor instance."""
-        global _redactor
+        """Get or create the global shared redactor instance.
         
-        # Always recreate if show_values changed (for debugging session)
-        # or if redactor doesn't exist yet
-        should_recreate = (
-            _redactor is None or 
-            (hasattr(_redactor, 'show_values') and _redactor.show_values != settings.show_redacted_values)
-        )
-        
-        if should_recreate:
-            # Load custom patterns
-            custom_patterns_path = settings.redaction_patterns_path
-            custom_patterns = load_custom_patterns(custom_patterns_path)
-            
-            # Setup audit logging if enabled AND we have a session_id
-            audit_log_path = None
-            enable_audit = False
-            # Use session_id from wrapper or fall back to settings.current_session_id
-            session_id_to_use = self.session_id or settings.current_session_id
-            if settings.enable_redaction_audit and session_id_to_use:
-                audit_log_path = Path(settings.sessions_base_dir) / session_id_to_use / "redaction_audit.log"
-                enable_audit = True
-            
-            _redactor = DataRedactor(
-                custom_patterns=custom_patterns,
-                enable_audit=enable_audit,
-                audit_log_path=audit_log_path,
-                redaction_placeholder="[REDACTED]",
-                show_values=settings.show_redacted_values
-            )
-        return _redactor
+        Uses the shared get_shared_redactor() from redactor.py to ensure the same
+        redactor instance is used by both chat and embeddings redaction, sharing
+        the same audit log.
+        """
+        return get_shared_redactor(session_id=self.session_id)
     
     def _redact_messages(self, messages: list[BaseMessage] | str) -> tuple[list[BaseMessage] | str, int]:
         """Redact sensitive data from messages.

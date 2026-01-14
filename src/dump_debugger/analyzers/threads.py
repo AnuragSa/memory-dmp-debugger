@@ -4,6 +4,7 @@ import re
 from typing import Any, Dict, List
 
 from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer
+from dump_debugger.utils.thread_registry import get_thread_registry
 
 
 class ThreadsAnalyzer(BaseAnalyzer):
@@ -50,6 +51,9 @@ class ThreadsAnalyzer(BaseAnalyzer):
             
             # Extract thread list
             threads = self._extract_threads(output)
+            
+            # Register threads in the global registry for cross-analyzer lookups
+            self._register_threads(threads)
             
             # Count threads by state
             state_counts = self._count_by_state(threads)
@@ -142,6 +146,26 @@ class ThreadsAnalyzer(BaseAnalyzer):
                 threads.append(thread)
         
         return threads
+    
+    def _register_threads(self, threads: List[Dict[str, Any]]):
+        """Register all threads in the global thread registry.
+        
+        This allows other analyzers (like clrstack) to lookup user-friendly
+        managed IDs from OSIDs.
+        """
+        registry = get_thread_registry()
+        # Clear existing registrations to ensure fresh data
+        registry.clear()
+        
+        for thread in threads:
+            registry.register_thread(
+                dbg_id=thread.get("dbg_id", 0),
+                managed_id=thread.get("managed_id", 0),
+                osid=thread.get("osid", ""),
+                thread_obj=thread.get("thread_obj"),
+                apartment=thread.get("apartment"),
+                special=thread.get("special"),
+            )
     
     def _count_by_state(self, threads: List[Dict[str, Any]]) -> Dict[str, int]:
         """Count threads by GC mode."""

@@ -51,7 +51,7 @@ class SyncBlockAnalyzer(BaseAnalyzer):
                 findings.append("⚠️ Lock contention detected - potential deadlock or blocking")
                 for sb in contention[:3]:  # Show top 3
                     findings.append(
-                        f"  Managed thread ID {sb.get('holding_thread')} holding lock, "
+                        f"  Thread {sb.get('holding_thread')} holding lock, "
                         f"{sb.get('waiting_threads')} threads waiting"
                     )
             else:

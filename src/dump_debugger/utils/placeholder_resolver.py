@@ -4,6 +4,7 @@ This module handles cases where the LLM suggests commands like:
 - !gcroot <address_of_sample_object>
 - !dumpheap -mt <MT_of_largest_objects>
 - !objsize <address_of_large_object>
+- ~~[ThreadId]s (malformed placeholder - should be actual OSID)
 
 It parses previous evidence to extract actual addresses, method tables, etc.
 """
@@ -16,10 +17,15 @@ from rich.console import Console
 console = Console()
 
 
+# Pattern to detect malformed thread placeholder in OSID syntax
+# This catches ~~[ThreadId]s, ~~[thread]e, etc. where ThreadId/thread is a placeholder, not a real OSID
+MALFORMED_THREAD_PLACEHOLDER = re.compile(r'~~\[([A-Za-z_][A-Za-z0-9_]*)\]', re.IGNORECASE)
+
+
 class PlaceholderResolver:
     """Resolves placeholders in debugger commands using previous evidence."""
     
-    # Patterns for different placeholder types
+    # Patterns for different placeholder types (angle brackets)
     PLACEHOLDER_PATTERNS = {
         # Match any <...address...> or <...addr...>
         'address': re.compile(r'<[^>]*(?:address|addr)[^>]*>', re.IGNORECASE),
@@ -27,8 +33,12 @@ class PlaceholderResolver:
         'mt': re.compile(r'<[^>]*(?:MT\b|MethodTable|method table)[^>]*>', re.IGNORECASE),
         # Match any <...object...>
         'object': re.compile(r'<[^>]*object[^>]*>', re.IGNORECASE),
-        # Match any <...thread...> or <...tid...>
+        # Match any <...thread...> or <...tid...> (generic thread placeholder)
         'thread': re.compile(r'<[^>]*(?:thread|tid)[^>]*>', re.IGNORECASE),
+        # Match placeholders specifically for DBG thread index (e.g., <DBG_THREAD_ID>, <OWNER_DBG>)
+        'dbg_thread': re.compile(r'<[^>]*(?:dbg[^>]*thread|owner[^>]*dbg)[^>]*>', re.IGNORECASE),
+        # Match placeholders specifically for OSID (e.g., <OSID>, <OWNER_OSID>)
+        'osid': re.compile(r'<[^>]*osid[^>]*>', re.IGNORECASE),
         # Match any <...module...>
         'module': re.compile(r'<[^>]*module[^>]*>', re.IGNORECASE),
         # Match any <...value...> or <...val...>
@@ -64,9 +74,29 @@ class PlaceholderResolver:
             re.compile(r'\b(?:0x)?0{4,8}([0-3][0-9a-f]{7,11})\b', re.IGNORECASE),
         ],
         'thread': [
-            # Thread IDs in various formats
+            # Thread IDs in various formats - returns (DBG#, OSID) tuples where available
+            # Pattern for !threads output: "  DBG#  ManagedID  OSID  ThreadObj..."
+            # Example: "  18    12  d78  000001234..."  -> DBG=18 (decimal), OSID=d78 (hex)
+            re.compile(r'^\s*(\d+)\s+\d+\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]{12,16}', re.MULTILINE),
+            # Pattern for !syncblk "Owning Thread Info": "ThreadObjAddr OSID DBG#"
+            # Example: "000002543dd83c70 d78  18" -> OSID=d78, DBG=18 (both hex here)
+            re.compile(r'[0-9a-fA-F]{12,16}\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]{12,16}', re.IGNORECASE),
+            # Simple thread ID patterns
             re.compile(r'(?:Thread|TID):\s*(\d+)', re.IGNORECASE),
-            re.compile(r'^\s*(\d+)\s+\d+\s+', re.MULTILINE),  # threads output format
+        ],
+        # New: Specific pattern for debugger thread index (for ~<num>e commands)
+        'dbg_thread': [
+            # From !threads: first column is DBG#
+            re.compile(r'^\s*(\d+)\s+\d+\s+[0-9a-fA-F]+\s+[0-9a-fA-F]{12,16}', re.MULTILINE),
+            # From !syncblk: last number before SyncBlock owner address is DBG# (in hex)
+            re.compile(r'[0-9a-fA-F]{12,16}\s+[0-9a-fA-F]+\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]{12,16}', re.IGNORECASE),
+        ],
+        # New: Specific pattern for OS thread ID (for ~~[osid]e commands)
+        'osid': [
+            # From !threads: third column is OSID (hex)
+            re.compile(r'^\s*\d+\s+\d+\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]{12,16}', re.MULTILINE),
+            # From !syncblk: OSID is after ThreadObjAddr
+            re.compile(r'[0-9a-fA-F]{12,16}\s+([0-9a-fA-F]+)\s+[0-9a-fA-F]+\s+[0-9a-fA-F]{12,16}', re.IGNORECASE),
         ],
     }
     
@@ -244,6 +274,37 @@ class PlaceholderResolver:
             # Extract values of this type
             values = self.extract_values(placeholder_type, context_hint)
             
+            # Handle thread placeholders specially
+            if placeholder_type in ('thread', 'dbg_thread', 'osid'):
+                if not values:
+                    unresolved.append(f"{placeholder_text} (no thread IDs found in evidence)")
+                    continue
+                
+                value_to_insert = values[0]
+                
+                # Determine the correct format based on command syntax
+                # For ~<num>e commands: use decimal DBG#
+                # For ~~[osid]e commands: use hex OSID without 0x
+                if '~[' in resolved_command or '~~[' in resolved_command:
+                    # OSID syntax - keep as hex without 0x prefix
+                    if value_to_insert.startswith('0x'):
+                        value_to_insert = value_to_insert[2:]
+                    # Don't convert - OSID should stay as hex
+                elif resolved_command.startswith('~') and 'e ' in resolved_command:
+                    # ~<num>e syntax - convert hex to decimal if needed
+                    # Check if value looks like hex (from !syncblk DBG# column which is hex)
+                    try:
+                        # If all chars are valid hex and could be interpreted as hex
+                        if all(c in '0123456789abcdefABCDEF' for c in value_to_insert):
+                            # Convert from hex to decimal
+                            decimal_val = int(value_to_insert, 16)
+                            value_to_insert = str(decimal_val)
+                    except ValueError:
+                        pass  # Keep original value
+                
+                resolved_command = resolved_command.replace(placeholder_text, value_to_insert)
+                continue
+            
             # Filter out used and invalid addresses
             if placeholder_type in ('address', 'object', 'mt'):
                 filtered_values = []
@@ -309,9 +370,44 @@ def detect_placeholders(command: str) -> bool:
         command: Command to check
         
     Returns:
-        True if command contains placeholders
+        True if command contains placeholders (angle brackets or malformed thread syntax)
     """
-    return bool(re.search(r'<[^>]+>', command))
+    # Check for angle bracket placeholders: <address>, <thread>, etc.
+    if re.search(r'<[^>]+>', command):
+        return True
+    
+    # Check for malformed thread placeholders: ~~[ThreadId], ~~[thread], etc.
+    # But NOT valid hex OSIDs like ~~[d78] or ~~[3fc]
+    is_malformed, _ = detect_malformed_thread_command(command)
+    if is_malformed:
+        return True
+    
+    return False
+
+
+def detect_malformed_thread_command(command: str) -> tuple[bool, str | None]:
+    """Detect if a command has malformed thread placeholder syntax.
+    
+    WinDbg uses ~~[OSID] where OSID is a hex value like d78, 3fc.
+    If the command has ~~[ThreadId] or ~~[thread] where the value is
+    clearly a placeholder name (not hex), this is malformed.
+    
+    Args:
+        command: Command to check
+        
+    Returns:
+        Tuple of (is_malformed, placeholder_name or None)
+    """
+    match = MALFORMED_THREAD_PLACEHOLDER.search(command)
+    if match:
+        placeholder_value = match.group(1)
+        # Check if it looks like a placeholder name vs a valid hex OSID
+        # Valid OSIDs: d78, 3fc, 1234, abc
+        # Placeholder names: ThreadId, thread, OWNER_THREAD, tid
+        if not all(c in '0123456789abcdefABCDEF' for c in placeholder_value):
+            # Contains non-hex chars, so it's a placeholder
+            return True, placeholder_value
+    return False, None
 
 
 def resolve_command_placeholders(
@@ -331,6 +427,57 @@ def resolve_command_placeholders(
     Returns:
         Tuple of (resolved_command, success, message)
     """
+    # First check for malformed thread command syntax like ~~[ThreadId]
+    is_malformed, placeholder_name = detect_malformed_thread_command(command)
+    if is_malformed:
+        # Try to resolve by finding thread IDs from evidence
+        resolver = PlaceholderResolver(previous_evidence)
+        
+        # Extract thread IDs from evidence (try both DBG# and OSID patterns)
+        dbg_threads = resolver.extract_values('dbg_thread')
+        osids = resolver.extract_values('osid')
+        
+        if dbg_threads:
+            # Prefer using ~<DBG#>e format - convert to decimal and replace
+            dbg_num = dbg_threads[0]
+            try:
+                # Convert hex to decimal if needed
+                if all(c in '0123456789abcdefABCDEF' for c in dbg_num):
+                    dbg_decimal = int(dbg_num, 16)
+                else:
+                    dbg_decimal = int(dbg_num)
+                
+                # Replace ~~[placeholder]s/e with ~<num>s/e format
+                # Match ~~[ThreadId]s or ~~[ThreadId]e patterns
+                fixed_cmd = re.sub(
+                    r'~~\[' + re.escape(placeholder_name) + r'\]([se])',
+                    f'~{dbg_decimal}\\1',
+                    command,
+                    flags=re.IGNORECASE
+                )
+                console.print(f"[dim cyan]  → Resolved malformed thread: ~~[{placeholder_name}] → ~{dbg_decimal}[/dim cyan]")
+                return fixed_cmd, True, f"Resolved malformed thread placeholder to DBG# {dbg_decimal}"
+            except ValueError:
+                pass
+        
+        if osids:
+            # Fall back to ~~[OSID] format
+            osid = osids[0]
+            if osid.startswith('0x'):
+                osid = osid[2:]
+            
+            fixed_cmd = re.sub(
+                r'~~\[' + re.escape(placeholder_name) + r'\]',
+                f'~~[{osid}]',
+                command,
+                flags=re.IGNORECASE
+            )
+            console.print(f"[dim cyan]  → Resolved malformed thread: ~~[{placeholder_name}] → ~~[{osid}][/dim cyan]")
+            return fixed_cmd, True, f"Resolved malformed thread placeholder to OSID {osid}"
+        
+        # Could not resolve - return failure
+        return command, False, f"Malformed thread placeholder ~~[{placeholder_name}] - no thread IDs found in evidence. Run !threads first."
+    
     if not detect_placeholders(command):
         return command, True, "No placeholders found"
     

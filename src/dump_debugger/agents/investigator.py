@@ -64,13 +64,27 @@ STRICT INSTRUCTIONS:
 5. Preserve the exact command syntax mentioned in the task
 6. For ranges like "5-10 objects", use the middle value (e.g., 7 objects)
 
-SPECIAL HANDLING FOR THREAD-SPECIFIC COMMANDS:
-If the task mentions running a command "on sample threads" or "for N threads":
-- First include "!threads" command to list all threads
-- Then for each sample thread, include "~<threadnum>e <command>" (NOT just the command alone)
-- Example: For "!clrstack on 5 sample threads", generate:
-  ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"]
-- Use <thread> as placeholder - we'll replace with actual thread numbers from !threads output
+THREAD COMMAND RULES - CRITICAL:
+When the task mentions examining specific threads (e.g., from !syncblk output):
+1. NEVER use placeholder syntax like ~~[ThreadId] or ~~[thread] - this is INVALID
+2. If you don't have the actual thread IDs, first include "!threads" to get them
+3. Use concrete thread numbers OR use ~*e for all threads
+
+VALID thread command syntax:
+- ~0e !clrstack       (execute on debugger thread 0)
+- ~24e !clrstack      (execute on debugger thread 24) 
+- ~~[d78]e !clrstack  (execute on OSID d78 - MUST be actual hex OSID, NOT a placeholder)
+- ~*e !clrstack       (execute on all threads)
+
+INVALID (NEVER USE):
+- ~~[ThreadId]s; !clrstack   (ThreadId is NOT a valid OSID)
+- ~~[thread]e !clrstack      (thread is NOT a valid OSID)
+- ~~[OWNER_THREAD]e !clrstack (OWNER_THREAD is NOT a valid OSID)
+
+If task says "examine threads waiting on SyncBlock X":
+1. Include "!threads" first to get actual thread IDs
+2. Then use "~*e !clrstack" to get all thread stacks, OR
+3. Use specific thread numbers if you know them from previous evidence
 
 CRITICAL COMMAND SYNTAX RULES:
 - ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
@@ -89,11 +103,11 @@ EXAMPLES:
 Task: "Run '!dumpheap -stat' then '!do' on 3 objects"
 Response: {{"commands": ["!dumpheap -stat", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap -stat followed by !do on 3 objects"}}
 
-Task: "Run '!dumpheap -mt 00007ff8' then '!do' on 5-10 Thread objects"
-Response: {{"commands": ["!dumpheap -mt 00007ff8", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap followed by !do on 7 Thread objects (middle of 5-10 range)"}}
+Task: "Examine all threads waiting on SyncBlock 470 with !clrstack"
+Response: {{"commands": ["!threads", "~*e !clrstack"], "rationale": "getting threads then examining all stacks to find waiting threads"}}
 
-Task: "Use !threads then !clrstack for 10 sample threads"
-Response: {{"commands": ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"], "rationale": "getting threads then running clrstack on 10 sample threads"}}
+Task: "Run !clrstack on thread 18 (DBG#) which holds the lock"
+Response: {{"commands": ["~18e !clrstack"], "rationale": "examining specific thread 18 stack"}}
 """
         else:
             prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.

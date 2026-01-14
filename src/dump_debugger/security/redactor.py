@@ -623,6 +623,204 @@ class DataRedactor:
         self.audit_file.flush()
 
 
+class RedactionEmbeddingsWrapper:
+    """Wrapper that applies data redaction before sending text to cloud embedding APIs.
+    
+    This wrapper intercepts embed_documents() and embed_query() calls, redacts sensitive
+    data using the same patterns as chat redaction, and logs redactions to the shared
+    audit log if enabled.
+    
+    SECURITY: This ensures that connection strings, API keys, credentials, and PII
+    are not leaked through embedding calls to cloud providers (OpenAI, Azure).
+    """
+    
+    def __init__(self, embeddings, provider_name: str, session_id: str | None = None):
+        """Initialize the embeddings wrapper.
+        
+        Args:
+            embeddings: Underlying embeddings instance (OpenAIEmbeddings, AzureOpenAIEmbeddings, etc.)
+            provider_name: Provider name for audit logging (e.g., "openai", "azure")
+            session_id: Session ID for audit logging (uses current session if not provided)
+        """
+        self._embeddings = embeddings
+        self._provider_name = provider_name
+        self._session_id = session_id
+        self._total_redactions = 0
+    
+    def _get_redactor(self) -> DataRedactor:
+        """Get or create the global redactor instance.
+        
+        Uses the shared get_shared_redactor() to ensure the same redactor instance
+        is used by both RedactionLLMWrapper (for chat) and RedactionEmbeddingsWrapper
+        (for embeddings), sharing the same audit log.
+        """
+        return get_shared_redactor(session_id=self._session_id)
+    
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Embed a list of documents after redacting sensitive data.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        redactor = self._get_redactor()
+        redacted_texts = []
+        total_redactions = 0
+        
+        for i, text in enumerate(texts):
+            redacted_text, redaction_count = redactor.redact_text(
+                text,
+                context=f"embedding_document_{self._provider_name}_{i}"
+            )
+            redacted_texts.append(redacted_text)
+            total_redactions += redaction_count
+        
+        self._total_redactions += total_redactions
+        
+        if total_redactions > 0:
+            console.print(
+                f"[dim]🔒 Redacted {total_redactions} sensitive item(s) from {len(texts)} document(s) before embedding[/dim]"
+            )
+        
+        return self._embeddings.embed_documents(redacted_texts)
+    
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a query after redacting sensitive data.
+        
+        Args:
+            text: Query text to embed
+            
+        Returns:
+            Embedding vector
+        """
+        redactor = self._get_redactor()
+        redacted_text, redaction_count = redactor.redact_text(
+            text,
+            context=f"embedding_query_{self._provider_name}"
+        )
+        
+        self._total_redactions += redaction_count
+        
+        if redaction_count > 0:
+            console.print(
+                f"[dim]🔒 Redacted {redaction_count} sensitive item(s) from query before embedding[/dim]"
+            )
+        
+        return self._embeddings.embed_query(redacted_text)
+    
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Async version of embed_documents with redaction.
+        
+        Args:
+            texts: List of texts to embed
+            
+        Returns:
+            List of embedding vectors
+        """
+        redactor = self._get_redactor()
+        redacted_texts = []
+        total_redactions = 0
+        
+        for i, text in enumerate(texts):
+            redacted_text, redaction_count = redactor.redact_text(
+                text,
+                context=f"embedding_document_{self._provider_name}_{i}"
+            )
+            redacted_texts.append(redacted_text)
+            total_redactions += redaction_count
+        
+        self._total_redactions += total_redactions
+        
+        if total_redactions > 0:
+            console.print(
+                f"[dim]🔒 Redacted {total_redactions} sensitive item(s) from {len(texts)} document(s) before async embedding[/dim]"
+            )
+        
+        return await self._embeddings.aembed_documents(redacted_texts)
+    
+    async def aembed_query(self, text: str) -> list[float]:
+        """Async version of embed_query with redaction.
+        
+        Args:
+            text: Query text to embed
+            
+        Returns:
+            Embedding vector
+        """
+        redactor = self._get_redactor()
+        redacted_text, redaction_count = redactor.redact_text(
+            text,
+            context=f"embedding_query_{self._provider_name}"
+        )
+        
+        self._total_redactions += redaction_count
+        
+        if redaction_count > 0:
+            console.print(
+                f"[dim]🔒 Redacted {redaction_count} sensitive item(s) from query before async embedding[/dim]"
+            )
+        
+        return await self._embeddings.aembed_query(redacted_text)
+    
+    def __getattr__(self, name: str):
+        """Delegate other attribute access to underlying embeddings."""
+        return getattr(self._embeddings, name)
+
+
+# Global redactor instance (shared by RedactionLLMWrapper and RedactionEmbeddingsWrapper)
+_redactor: DataRedactor | None = None
+
+
+def get_shared_redactor(session_id: str | None = None) -> DataRedactor:
+    """Get or create the global shared redactor instance.
+    
+    This function provides a single shared redactor for both LLM and embeddings
+    redaction, ensuring consistent patterns and a shared audit log.
+    
+    Args:
+        session_id: Session ID for audit logging (optional, falls back to settings.current_session_id)
+        
+    Returns:
+        DataRedactor instance with audit logging configured if enabled
+    """
+    global _redactor
+    
+    # Import settings here to avoid circular import
+    from dump_debugger.config import settings
+    
+    # Always recreate if show_values changed (for debugging session)
+    # or if redactor doesn't exist yet
+    should_recreate = (
+        _redactor is None or 
+        (hasattr(_redactor, 'show_values') and _redactor.show_values != settings.show_redacted_values)
+    )
+    
+    if should_recreate:
+        # Load custom patterns
+        custom_patterns_path = settings.redaction_patterns_path
+        custom_patterns = load_custom_patterns(custom_patterns_path)
+        
+        # Setup audit logging if enabled AND we have a session_id
+        audit_log_path = None
+        enable_audit = False
+        # Use provided session_id or fall back to settings.current_session_id
+        session_id_to_use = session_id or settings.current_session_id
+        if settings.enable_redaction_audit and session_id_to_use:
+            audit_log_path = Path(settings.sessions_base_dir) / session_id_to_use / "redaction_audit.log"
+            enable_audit = True
+        
+        _redactor = DataRedactor(
+            custom_patterns=custom_patterns,
+            enable_audit=enable_audit,
+            audit_log_path=audit_log_path,
+            redaction_placeholder="[REDACTED]",
+            show_values=settings.show_redacted_values
+        )
+    return _redactor
+
+
 def load_custom_patterns(patterns_path: str | Path | None = None) -> list[RedactionPattern]:
     """Load custom redaction patterns from Python file.
     

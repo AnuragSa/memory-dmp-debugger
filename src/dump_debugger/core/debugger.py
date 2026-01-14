@@ -78,10 +78,15 @@ class DebuggerWrapper:
         # Track current thread context for cache keying
         self._current_thread = None  # Format: "0x1234" or thread index
         
+        # Session tracking for audit logging
+        self.session_dir = session_dir
+        self.session_id = session_dir.name if session_dir else None
+        
         # Evidence management
         self.evidence_store = None
         self.evidence_analyzer = None
         self.embeddings_client = None
+        self._embeddings_wrapper = None  # Lazy-loaded LangChain embeddings with redaction
         if session_dir:
             from dump_debugger.evidence import EvidenceStore, EvidenceAnalyzer
             from dump_debugger.llm import get_llm
@@ -125,6 +130,30 @@ class DebuggerWrapper:
         
         # Start the persistent debugger session
         self._start_session()
+    
+    def _embed_text(self, text: str) -> list[float] | None:
+        """Embed text using redaction-wrapped embeddings.
+        
+        SECURITY: This method ensures all text is redacted before being sent
+        to cloud embedding APIs. Uses the shared redactor with audit logging.
+        
+        Args:
+            text: Text to embed (will be redacted before embedding)
+            
+        Returns:
+            Embedding vector, or None if embeddings are not available
+        """
+        try:
+            # Lazy-load the embeddings wrapper (with redaction for cloud providers)
+            if self._embeddings_wrapper is None:
+                from dump_debugger.llm import get_embeddings
+                self._embeddings_wrapper = get_embeddings(session_id=self.session_id)
+            
+            return self._embeddings_wrapper.embed_query(text)
+        except Exception as e:
+            if self.show_output:
+                console.print(f"[yellow]⚠ Embedding generation failed: {e}[/yellow]")
+            return None
     
     def _init_embeddings_client(self):
         """Initialize embeddings client based on configuration.
@@ -608,19 +637,12 @@ class DebuggerWrapper:
             # Store result in evidence cache for future reuse
             if success and self.evidence_store and output:
                 # Generate embedding for semantic search (even for small outputs)
+                # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
                 embedding = None
-                if self.embeddings_client and output:
-                    try:
-                        # Use truncated output for embedding (embeddings have token limits)
-                        embedding_text = output[:8000] if len(output) > 8000 else output
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=embedding_text,
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                    except Exception as e:
-                        if self.show_output:
-                            console.print(f"[yellow]⚠ Embedding generation failed: {e}[/yellow]")
+                if (self.embeddings_client or settings.use_embeddings) and output:
+                    # Use truncated output for embedding (embeddings have token limits)
+                    embedding_text = output[:8000] if len(output) > 8000 else output
+                    embedding = self._embed_text(embedding_text)
                 
                 # Store with embedding (analysis added later if needed)
                 evidence_id = self.evidence_store.store_evidence(
@@ -745,23 +767,10 @@ class DebuggerWrapper:
             console.print(f"[dim]Output size {output_size} bytes exceeds threshold ({threshold}), storing externally...[/dim]")
             
             # Generate embedding from summary for better semantic search
+            # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
             embedding = None
-            if self.embeddings_client and analysis.get('summary'):
-                try:
-                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
-                        # Use LangChain embeddings for Ollama
-                        from dump_debugger.llm import get_embeddings
-                        embeddings = get_embeddings()
-                        embedding = embeddings.embed_query(analysis['summary'])
-                    elif settings.embeddings_provider in ["openai", "azure"]:
-                        # Use OpenAI/Azure client
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=analysis['summary'],
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                except Exception as e:
-                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            if (self.embeddings_client or settings.use_embeddings) and analysis.get('summary'):
+                embedding = self._embed_text(analysis['summary'])
             
             # Update existing evidence with analysis or create new if not cached
             if result.get('cached') or existing_evidence_id:
@@ -813,23 +822,10 @@ class DebuggerWrapper:
             }
             
             # Generate embedding from summary for semantic search (even for inline storage)
+            # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
             embedding = None
-            if self.embeddings_client and analysis.get('summary'):
-                try:
-                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
-                        # Use LangChain embeddings for Ollama
-                        from dump_debugger.llm import get_embeddings
-                        embeddings = get_embeddings()
-                        embedding = embeddings.embed_query(analysis['summary'])
-                    elif settings.embeddings_provider in ["openai", "azure"]:
-                        # Use OpenAI/Azure client
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=analysis['summary'],
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                except Exception as e:
-                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            if (self.embeddings_client or settings.use_embeddings) and analysis.get('summary'):
+                embedding = self._embed_text(analysis['summary'])
             
             # Update the database with analysis if evidence was already cached
             if result.get('cached') and result.get('evidence_id'):

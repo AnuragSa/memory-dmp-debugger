@@ -48,6 +48,31 @@ class CommandHealer:
         Returns:
             Healed command string, or None if can't heal
         """
+        # Check for malformed thread placeholder syntax (e.g., ~~[ThreadId])
+        # This is a common LLM mistake that can't be healed without evidence
+        malformed_match = re.search(r'~~\[([A-Za-z_][A-Za-z0-9_]*)\]', command)
+        if malformed_match:
+            placeholder_name = malformed_match.group(1)
+            # Check if it's clearly a placeholder (not a valid hex OSID)
+            if not all(c in '0123456789abcdefABCDEF' for c in placeholder_name):
+                # Try to resolve using placeholder resolver if we have context
+                if context and 'previous_evidence' in context:
+                    from dump_debugger.utils.placeholder_resolver import resolve_command_placeholders
+                    resolved, success, msg = resolve_command_placeholders(
+                        command, context['previous_evidence']
+                    )
+                    if success and resolved != command:
+                        self.heal_count += 1
+                        console.print(f"[cyan]🔧 Healed:[/cyan] {command}")
+                        console.print(f"[cyan]   → {resolved}[/cyan]")
+                        return resolved
+                
+                # Cannot heal without thread IDs
+                console.print(f"[yellow]⚠ Cannot heal malformed thread placeholder: ~~[{placeholder_name}][/yellow]")
+                console.print(f"[yellow]   Run !threads first to get actual thread IDs[/yellow]")
+                self.failed_heals += 1
+                return None
+        
         # Use LLM-based healing - primary and most intelligent approach
         if self.use_llm and self.llm:
             healed = self._heal_with_llm(command, error_output, context)
@@ -136,10 +161,22 @@ KEY DEBUGGING KNOWLEDGE:
    - NEVER add -stat flag if original command didn't have it
    - NEVER change the output format flags
 
-4. THREAD SYNTAX:
-   - ~0e = switch to debugger thread 0 and execute
-   - ~8s = switch to OS thread 8
-   - ~~[123]e = switch to OS thread ID 123 (decimal, no 0x)
+4. THREAD SYNTAX - CRITICAL:
+   There are THREE different thread IDs:
+   - DBG# = Debugger thread index (0, 1, 2...) shown first in !threads output
+   - Managed ID = CLR's internal ID, shown in !syncblk "Owning Thread" column  
+   - OSID = OS thread ID in hex (e.g., d78, 3fc) shown in !threads OSID column
+
+   Command syntax:
+   - ~<DBG#>e <cmd> = Execute on debugger thread index (e.g., ~18e !clrstack for DBG# 18)
+   - ~~[<OSID>]e <cmd> = Execute on OSID (e.g., ~~[d78]e !clrstack for OSID d78)
+   - OSID in brackets is HEX without 0x prefix (~~[d78]e NOT ~~[0xd78]e or ~~[3448]e)
+   
+   !syncblk output format: "ThreadObjAddr OSID DBG#" (e.g., "000002543dd83c70 d78  18")
+   - To examine this thread: use ~24e !clrstack (DBG# 18 in hex = 24 decimal)
+   - OR: ~~[d78]e !clrstack (OSID d78 stays as hex)
+   
+   PREFER ~<DBG#>e over ~~[OSID]e for reliability. Convert hex DBG# to decimal.
 
 5. DATA MODEL vs SOS:
    - dx commands often fail → use SOS equivalents

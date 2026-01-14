@@ -260,7 +260,7 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
             if current_round >= self.max_rounds and result.get('issues_found', False):
                 if current_round > 1:
                     # Round 2 with remaining issues - silent generation
-                    console.print("\n[dim yellow]⚠ Some gaps remain - generating follow-up questions...[/dim yellow]")
+                    console.print("\n[dim yellow]⚠ Generating follow-up questions...[/dim yellow]")
                 suggested_questions = self.generate_follow_up_questions(result, state.get('issue_description', 'Unknown issue'))
                 result['suggested_questions'] = suggested_questions
             
