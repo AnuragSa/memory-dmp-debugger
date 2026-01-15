@@ -362,7 +362,7 @@ Recommended for enterprise deployments using Claude Sonnet 3.5+ or a model capab
 LLM_PROVIDER=azure
 
 # Azure AI Foundry credentials
-AZURE_OPENAI_ENDPOINT=https://your-project.services.ai.azure.com/models
+AZURE_OPENAI_ENDPOINT=https://<your-instance>.services.ai.azure.com/models/anthropic/
 AZURE_OPENAI_API_KEY=your-api-key-here
 AZURE_OPENAI_DEPLOYMENT=claude-3-5-sonnet
 AZURE_OPENAI_API_VERSION=2024-10-01-preview

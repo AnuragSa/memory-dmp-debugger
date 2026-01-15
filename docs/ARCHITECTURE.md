@@ -113,10 +113,7 @@ Use **iterative reasoning** where:
 
 ### Implementation
 
-**State Fields** (`AnalysisState`):
-- `reasoning_iterations: int` - Tracks iteration count (max 3)
-- `needs_deeper_investigation: bool` - Flag set by reasoner when gaps detected
-- `investigation_requests: list[dict[str, str]]` - Specific requests from reasoner
+
 
 **Investigation Request Structure**:
 ```python
@@ -221,6 +218,7 @@ All agents follow LangGraph's stateless pattern and are organized in the `src/du
 
 - **HypothesisDrivenAgent** (temp: 0.0) - Forms and tests hypotheses, evaluates results
 - **InvestigatorAgent** (temp: 0.1) - Executes focused investigation tasks  
+- **PlannerAgentV2** (temp: 0.1) - Plans investigation strategies and task sequences
 - **ReasonerAgent** (temp: 0.2) - Synthesizes all evidence into conclusions
 - **CriticAgent** (temp: 0.5) - Reviews analysis for quality issues
 - **ReportWriter** (temp: 0.2) - Generates formatted reports
