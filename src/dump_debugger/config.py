@@ -44,10 +44,7 @@ class Settings(BaseSettings):
     )
     
     # Local LLM Configuration (Ollama)
-    use_local_llm: bool = Field(
-        default=False,
-        description="Enable local LLM support via Ollama"
-    )
+    # Set LLM_PROVIDER=ollama to use local LLM for reasoning
     local_llm_base_url: str = Field(
         default="http://localhost:11434",
         description="Ollama API endpoint"
@@ -72,17 +69,13 @@ class Settings(BaseSettings):
     # Tiered LLM Strategy
     use_tiered_llm: bool = Field(
         default=False,
-        description="Enable tiered LLM routing (local for simple, cloud for complex)"
-    )
-    cloud_llm_provider: Literal["openai", "anthropic", "azure"] = Field(
-        default="azure",
-        description="Cloud LLM provider for complex tasks"
+        description="Enable tiered LLM routing: simple tasks use Ollama, complex tasks use LLM_PROVIDER"
     )
     
     # Privacy & Security
     local_only_mode: bool = Field(
         default=False,
-        description="SECURITY: Hard-disable all cloud LLM calls - nothing leaves the machine. Requires local LLM (Ollama) to be configured."
+        description="SECURITY: Force Ollama for all reasoning and disable cloud embeddings. Nothing leaves the machine."
     )
     enable_redaction_audit: bool = Field(
         default=False,

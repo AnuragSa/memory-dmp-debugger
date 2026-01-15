@@ -33,16 +33,13 @@ except ImportError:
     AZURE_AI_AVAILABLE = False
 
 from dump_debugger.config import settings
-from dump_debugger.security.redactor import DataRedactor, load_custom_patterns
+from dump_debugger.security.redactor import DataRedactor, load_custom_patterns, RedactionEmbeddingsWrapper, get_shared_redactor
 from dump_debugger.token_tracker import create_callback
 
 console = Console()
 
 # LLM instance cache to avoid creating duplicates
 _llm_cache: dict[str, BaseChatModel] = {}
-
-# Global redactor instance (initialized on first use)
-_redactor: DataRedactor | None = None
 
 
 def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChatModel:
@@ -56,41 +53,33 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
         Configured LLM instance (cached to avoid duplicates)
         
     Raises:
-        ValueError: If provider is not configured or invalid, or if local-only mode requires Ollama
+        ValueError: If provider is not configured or invalid
     """
-    provider = settings.llm_provider.lower()
+    # Determine effective provider
+    # Priority: local_only_mode forces ollama, otherwise use llm_provider
+    effective_provider = settings.llm_provider.lower()
     
-    # SECURITY: Enforce local-only mode
+    # SECURITY: Enforce local-only mode - forces Ollama for reasoning
     if settings.local_only_mode:
-        if provider != "ollama":
-            raise ValueError(
-                "🔒 LOCAL-ONLY MODE is enabled but cloud LLM provider is configured.\n\n"
-                "To use local-only mode, configure Ollama in your .env file:\n"
-                "  USE_LOCAL_LLM=true\n"
-                "  LOCAL_LLM_MODEL=qwen2.5-coder:7b\n"
-                "  LOCAL_LLM_BASE_URL=http://localhost:11434\n\n"
-                "Then set LLM_PROVIDER=ollama or remove the LOCAL_ONLY_MODE setting.\n\n"
-                "Install Ollama: https://ollama.com/download"
-            )
-        console.print("[green]🔒 LOCAL-ONLY MODE: All processing stays on your machine[/green]")
+        effective_provider = "ollama"
     
     # Check cache first (key includes provider, model, and temperature)
-    cache_key = f"{provider}:{temperature}"
-    if provider == "ollama":
+    cache_key = f"{effective_provider}:{temperature}"
+    if effective_provider == "ollama":
         cache_key = f"ollama:{settings.local_llm_model}:{temperature}"
-    elif provider == "azure":
+    elif effective_provider == "azure":
         cache_key = f"azure:{settings.azure_openai_deployment}:{temperature}"
-    elif provider == "openai":
+    elif effective_provider == "openai":
         cache_key = f"openai:{settings.openai_model}:{temperature}"
-    elif provider == "anthropic":
+    elif effective_provider == "anthropic":
         cache_key = f"anthropic:{settings.anthropic_model}:{temperature}"
     
     if cache_key in _llm_cache:
-        console.print(f"[dim]♻️ Reusing cached LLM: {provider} (temp={temperature})[/dim]")
+        console.print(f"[dim]♻️ Reusing cached LLM: {effective_provider} (temp={temperature})[/dim]")
         return _llm_cache[cache_key]
     
     # Determine if this is a local provider for token tracking
-    is_local = (provider == "ollama")
+    is_local = (effective_provider == "ollama")
     
     # Create token counting callback
     try:
@@ -99,7 +88,7 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
     except Exception:
         callbacks = []
     
-    if provider == "openai":
+    if effective_provider == "openai":
         if not settings.openai_api_key:
             raise ValueError("OpenAI API key not configured. Set OPENAI_API_KEY in .env")
         
@@ -116,7 +105,7 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
         _llm_cache[cache_key] = llm
         return llm
     
-    elif provider == "anthropic":
+    elif effective_provider == "anthropic":
         if not settings.anthropic_api_key:
             raise ValueError("Anthropic API key not configured. Set ANTHROPIC_API_KEY in .env")
         
@@ -133,7 +122,7 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
         _llm_cache[cache_key] = llm
         return llm
     
-    elif provider == "azure":
+    elif effective_provider == "azure":
         if not settings.azure_openai_api_key or not settings.azure_openai_endpoint:
             raise ValueError(
                 "Azure not configured. Set AZURE_OPENAI_API_KEY and "
@@ -175,10 +164,7 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
             _llm_cache[cache_key] = llm
             return llm
     
-    elif provider == "ollama":
-        if not settings.use_local_llm:
-            raise ValueError("Ollama not enabled. Set USE_LOCAL_LLM=true in .env")
-        
+    elif effective_provider == "ollama":
         llm = ChatOllama(
             model=settings.local_llm_model,
             base_url=settings.local_llm_base_url,
@@ -192,9 +178,121 @@ def get_llm(temperature: float = 0.0, session_id: str | None = None) -> BaseChat
     
     else:
         raise ValueError(
-            f"Invalid LLM provider: {provider}. "
+            f"Invalid LLM provider: {effective_provider}. "
             "Choose from: openai, anthropic, azure, ollama"
         )
+
+
+def get_llm_for_provider(
+    provider: str,
+    temperature: float = 0.0,
+    session_id: str | None = None
+) -> BaseChatModel:
+    """Get LLM instance for a specific provider without modifying global settings.
+    
+    This is used by the LLM router to get cloud/local LLM instances without
+    mutating settings.llm_provider, which could affect embeddings selection.
+    
+    Args:
+        provider: The provider to use ('openai', 'anthropic', 'azure', 'ollama')
+        temperature: Model temperature
+        session_id: Session ID for audit logging
+        
+    Returns:
+        LLM instance for the specified provider
+    """
+    provider = provider.lower()
+    
+    # Build cache key
+    cache_key = f"explicit:{provider}:{temperature}"
+    if provider == "ollama":
+        cache_key = f"explicit:ollama:{settings.local_llm_model}:{temperature}"
+    elif provider == "azure":
+        cache_key = f"explicit:azure:{settings.azure_openai_deployment}:{temperature}"
+    elif provider == "openai":
+        cache_key = f"explicit:openai:{settings.openai_model}:{temperature}"
+    elif provider == "anthropic":
+        cache_key = f"explicit:anthropic:{settings.anthropic_model}:{temperature}"
+    
+    if cache_key in _llm_cache:
+        return _llm_cache[cache_key]
+    
+    is_local = (provider == "ollama")
+    
+    try:
+        callback = create_callback(is_local=is_local)
+        callbacks = [callback]
+    except Exception:
+        callbacks = []
+    
+    if provider == "openai":
+        if not settings.openai_api_key:
+            raise ValueError("OpenAI API key not configured")
+        llm = ChatOpenAI(
+            model=settings.openai_model,
+            temperature=temperature,
+            api_key=settings.openai_api_key,
+            max_tokens=32768,
+            request_timeout=60,
+            callbacks=callbacks,
+        )
+        llm = _wrap_with_redaction(llm, "openai", session_id)
+        
+    elif provider == "anthropic":
+        if not settings.anthropic_api_key:
+            raise ValueError("Anthropic API key not configured")
+        llm = ChatAnthropic(
+            model=settings.anthropic_model,
+            temperature=temperature,
+            api_key=settings.anthropic_api_key,
+            max_tokens=32768,
+            timeout=60,
+            callbacks=callbacks,
+        )
+        llm = _wrap_with_redaction(llm, "anthropic", session_id)
+        
+    elif provider == "azure":
+        if not settings.azure_openai_api_key or not settings.azure_openai_endpoint:
+            raise ValueError("Azure not configured")
+        endpoint = settings.azure_openai_endpoint
+        if "services.ai.azure.com" in endpoint.lower():
+            llm = ChatAnthropic(
+                model=settings.azure_openai_deployment or "claude-3-5-sonnet",
+                temperature=temperature,
+                anthropic_api_key=settings.azure_openai_api_key,
+                base_url=endpoint,
+                max_tokens=32768,
+                timeout=60,
+                callbacks=callbacks,
+            )
+            llm = _wrap_with_redaction(llm, "azure-foundry", session_id)
+        else:
+            llm = AzureChatOpenAI(
+                azure_deployment=settings.azure_openai_deployment,
+                api_version=settings.azure_openai_api_version,
+                azure_endpoint=settings.azure_openai_endpoint,
+                api_key=settings.azure_openai_api_key,
+                temperature=temperature,
+                max_tokens=32768,
+                request_timeout=60,
+                callbacks=callbacks,
+            )
+            llm = _wrap_with_redaction(llm, "azure-openai", session_id)
+            
+    elif provider == "ollama":
+        llm = ChatOllama(
+            model=settings.local_llm_model,
+            base_url=settings.local_llm_base_url,
+            temperature=temperature,
+            timeout=settings.local_llm_timeout,
+            num_ctx=settings.local_llm_context_size,
+            callbacks=callbacks,
+        )
+    else:
+        raise ValueError(f"Invalid provider: {provider}")
+    
+    _llm_cache[cache_key] = llm
+    return llm
 
 
 def get_structured_llm(temperature: float = 0.0) -> BaseChatModel:
@@ -221,34 +319,91 @@ def get_structured_llm(temperature: float = 0.0) -> BaseChatModel:
     return llm
 
 
-def get_embeddings() -> Embeddings:
-    """Get embeddings model based on configured LLM provider.
+def get_embeddings(session_id: str | None = None) -> Embeddings:
+    """Get embeddings model based on configured embeddings provider.
+    
+    In LOCAL_ONLY_MODE, embeddings are disabled (raises ValueError) to prevent
+    any data from leaving the machine. Callers should fall back to keyword search.
+    
+    SECURITY: Cloud embeddings (OpenAI, Azure) are wrapped with RedactionEmbeddingsWrapper
+    to ensure sensitive data is redacted before being sent to the embedding API.
+    
+    Args:
+        session_id: Session ID for audit logging (optional)
     
     Returns:
-        Embeddings instance for semantic search
+        Embeddings instance for semantic search (wrapped with redaction for cloud providers)
         
     Raises:
-        ValueError: If provider doesn't support embeddings or is not configured
+        ValueError: If local-only mode is enabled, provider doesn't support embeddings,
+                   or provider is not configured
     """
-    provider = settings.llm_provider.lower()
+    # SECURITY: Disable embeddings in local-only mode to prevent cloud calls
+    if settings.local_only_mode:
+        raise ValueError(
+            "🔒 LOCAL-ONLY MODE: Embeddings disabled to prevent cloud calls. "
+            "Using keyword search instead."
+        )
+    
+    # Use embeddings_provider setting, fall back to llm_provider for backward compat
+    provider = settings.embeddings_provider.lower() if settings.embeddings_provider else settings.llm_provider.lower()
     
     if provider == "openai":
-        return OpenAIEmbeddings(
-            model="text-embedding-3-small",
+        embeddings = OpenAIEmbeddings(
+            model=settings.embeddings_model,
             api_key=settings.openai_api_key
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "openai", session_id)
     
     elif provider == "azure":
-        # For Azure, embeddings require a separate deployment
-        # Skip if not configured - will fall back to keyword matching
-        raise ValueError(
-            "Azure embeddings not configured. "
-            "Deploy 'text-embedding-3-small' in Azure OpenAI and set AZURE_OPENAI_EMBEDDINGS_DEPLOYMENT env var. "
-            "Falling back to keyword matching."
+        # Azure embeddings require a separate deployment
+        # Check if Azure embeddings are configured
+        azure_endpoint = settings.azure_embeddings_endpoint or settings.azure_openai_endpoint
+        azure_api_key = settings.azure_embeddings_api_key or settings.azure_openai_api_key
+        azure_deployment = settings.azure_embeddings_deployment
+        
+        if not azure_endpoint or not azure_api_key:
+            raise ValueError(
+                "Azure embeddings not configured. "
+                "Set AZURE_EMBEDDINGS_ENDPOINT and AZURE_EMBEDDINGS_API_KEY in .env. "
+                "Falling back to keyword matching."
+            )
+        
+        # Try to extract deployment from endpoint URL if not explicitly set
+        # Azure AI Foundry format: https://<instance>.cognitiveservices.azure.com/openai/deployments/<deployment>/embeddings
+        if not azure_deployment:
+            import re
+            match = re.search(r'/deployments/([^/]+)/', azure_endpoint)
+            if match:
+                azure_deployment = match.group(1)
+                #console.print(f"[dim]Extracted embeddings deployment from endpoint: {azure_deployment}[/dim]")
+        
+        if not azure_deployment:
+            raise ValueError(
+                "Azure embeddings deployment not configured. "
+                "Set AZURE_EMBEDDINGS_DEPLOYMENT env var to your deployment name. "
+                "Falling back to keyword matching."
+            )
+        
+        # Extract base endpoint (without the deployment path) for AzureOpenAIEmbeddings
+        # The LangChain AzureOpenAIEmbeddings expects the base URL, not the full path
+        base_endpoint = azure_endpoint
+        if '/openai/deployments/' in azure_endpoint:
+            # Azure AI Foundry full URL - extract base
+            base_endpoint = azure_endpoint.split('/openai/deployments/')[0]
+        
+        embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=azure_deployment,
+            azure_endpoint=base_endpoint,
+            api_key=azure_api_key,
+            api_version=settings.azure_openai_api_version,
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "azure", session_id)
     
     elif provider == "ollama":
-        # Ollama with local embeddings model
+        # Ollama with local embeddings model - no redaction needed (local)
         return OllamaEmbeddings(
             model=settings.local_embeddings_model or "nomic-embed-text",
             base_url=settings.local_llm_base_url
@@ -256,13 +411,15 @@ def get_embeddings() -> Embeddings:
     
     elif provider == "anthropic":
         # Anthropic doesn't provide embeddings, fall back to OpenAI
-        console.print("[yellow]⚠ Anthropic doesn't provide embeddings, using OpenAI text-embedding-3-small[/yellow]")
+        console.print(f"[yellow]⚠ Anthropic doesn't provide embeddings, using OpenAI {settings.embeddings_model}[/yellow]")
         if not settings.openai_api_key:
             raise ValueError("OpenAI API key required for embeddings when using Anthropic LLM")
-        return OpenAIEmbeddings(
-            model="text-embedding-3-small",
+        embeddings = OpenAIEmbeddings(
+            model=settings.embeddings_model,
             api_key=settings.openai_api_key
         )
+        # SECURITY: Wrap with redaction for cloud provider
+        return RedactionEmbeddingsWrapper(embeddings, "openai-for-anthropic", session_id)
     
     else:
         raise ValueError(f"Embeddings not supported for provider: {provider}")
@@ -295,38 +452,13 @@ class RedactionLLMWrapper(BaseChatModel):
         self._total_redactions = 0
     
     def _get_redactor(self) -> DataRedactor:
-        """Get or create the global redactor instance."""
-        global _redactor
+        """Get or create the global shared redactor instance.
         
-        # Always recreate if show_values changed (for debugging session)
-        # or if redactor doesn't exist yet
-        should_recreate = (
-            _redactor is None or 
-            (hasattr(_redactor, 'show_values') and _redactor.show_values != settings.show_redacted_values)
-        )
-        
-        if should_recreate:
-            # Load custom patterns
-            custom_patterns_path = settings.redaction_patterns_path
-            custom_patterns = load_custom_patterns(custom_patterns_path)
-            
-            # Setup audit logging if enabled AND we have a session_id
-            audit_log_path = None
-            enable_audit = False
-            # Use session_id from wrapper or fall back to settings.current_session_id
-            session_id_to_use = self.session_id or settings.current_session_id
-            if settings.enable_redaction_audit and session_id_to_use:
-                audit_log_path = Path(settings.sessions_base_dir) / session_id_to_use / "redaction_audit.log"
-                enable_audit = True
-            
-            _redactor = DataRedactor(
-                custom_patterns=custom_patterns,
-                enable_audit=enable_audit,
-                audit_log_path=audit_log_path,
-                redaction_placeholder="[REDACTED]",
-                show_values=settings.show_redacted_values
-            )
-        return _redactor
+        Uses the shared get_shared_redactor() from redactor.py to ensure the same
+        redactor instance is used by both chat and embeddings redaction, sharing
+        the same audit log.
+        """
+        return get_shared_redactor(session_id=self.session_id)
     
     def _redact_messages(self, messages: list[BaseMessage] | str) -> tuple[list[BaseMessage] | str, int]:
         """Redact sensitive data from messages.

@@ -3,7 +3,7 @@
 import re
 from typing import Any, Dict, List
 
-from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, TaskComplexity
+from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, LLMInvocationError, TaskComplexity
 
 
 class GCHandlesAnalyzer(BaseAnalyzer):
@@ -38,8 +38,7 @@ class GCHandlesAnalyzer(BaseAnalyzer):
             
             # Generate summary using local LLM if significant handles
             if total_handles > 100:
-                llm = self.get_llm(TaskComplexity.SIMPLE)
-                interpretation = self._interpret_handles(llm, stats, type_counts, handles[:20])
+                interpretation = self._interpret_handles(stats, type_counts, handles[:20])
             else:
                 interpretation = "Low handle count, no concerns."
             
@@ -144,7 +143,6 @@ class GCHandlesAnalyzer(BaseAnalyzer):
     
     def _interpret_handles(
         self,
-        llm: Any,
         stats: Dict[str, int],
         type_counts: Dict[str, int],
         sample_handles: List[Dict[str, Any]],
@@ -162,7 +160,8 @@ Top types: {types_str}
 Identify any concerning patterns (handle leaks, excessive pinning). One sentence."""
         
         try:
-            response = llm.invoke(prompt)
+            response = self.invoke_llm_with_fallback(prompt, TaskComplexity.MODERATE)
             return response.content.strip()
-        except Exception:
-            return "Handle analysis complete."
+        except LLMInvocationError:
+            # Re-raise LLM errors - no silent fallback
+            raise

@@ -63,7 +63,7 @@ def _display_security_banner():
         # Cloud mode - show warnings and redaction status
         provider_name = settings.llm_provider.upper()
         if settings.use_tiered_llm:
-            provider_name = f"{settings.cloud_llm_provider.upper()} (tiered with local)"
+            provider_name = f"{settings.llm_provider.upper()} (tiered with Ollama)"
         
         panel_content = (
             f"[bold yellow]⚠️  CLOUD MODE - {provider_name}[/bold yellow]\n\n"
@@ -279,6 +279,23 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
     # Node functions
     def form_hypothesis_node(state: AnalysisState) -> dict:
         """Form initial hypothesis from user question."""
+        # Populate thread_info from debugger on first call (startup caching)
+        if state.get('thread_info') is None:
+            thread_info = debugger.get_thread_info()
+            if thread_info:
+                # Also populate the thread registry for global lookup
+                from dump_debugger.utils.thread_registry import ThreadRegistry
+                registry = ThreadRegistry()
+                for t in thread_info.get('threads', []):
+                    registry.register_thread(
+                        osid=t.get('osid', ''),
+                        managed_id=t.get('managed_id'),
+                        dbg_id=t.get('dbg_id')
+                    )
+                console.print(f"[dim]Cached {len(thread_info.get('threads', []))} threads at startup[/dim]")
+            result = hypothesis_agent.form_initial_hypothesis(state)
+            result['thread_info'] = thread_info
+            return result
         return hypothesis_agent.form_initial_hypothesis(state)
     
     def test_hypothesis_node(state: AnalysisState) -> dict:
@@ -404,12 +421,68 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         
         if evidence_requests:
             # Critic identified evidence gaps - need to collect more data
-            console.print(f"[yellow]⚠ Critic identified {len(evidence_requests)} evidence gap(s) requiring investigation[/yellow]")
+            # Filter out requests for evidence we already have
+            evidence_inventory = state.get('evidence_inventory', {})
+            commands_executed = state.get('commands_executed', [])
+            
+            # Build set of commands we've already run
+            executed_commands = set()
+            for cmd in commands_executed:
+                # Normalize command (remove thread prefixes, whitespace)
+                normalized = cmd.strip().lower()
+                # Extract the actual command part (after thread prefix if present)
+                if 'e ' in normalized:
+                    parts = normalized.split('e ', 1)
+                    if len(parts) == 2:
+                        normalized = parts[1].strip()
+                executed_commands.add(normalized)
+            
+            # Filter evidence requests
+            filtered_requests = []
+            skipped_requests = []
+            for action in evidence_requests:
+                action_lower = action.lower()
+                # Extract command from request text (look for !command patterns)
+                has_existing_evidence = False
+                
+                # Check for common commands in the request
+                common_commands = ['!threadpool', '!threads', '!eeheap', '!dumpheap', '!syncblk', '!clrstack']
+                for cmd in common_commands:
+                    if cmd in action_lower:
+                        # Check if we've executed this command
+                        cmd_normalized = cmd.strip().lower()
+                        if cmd_normalized in executed_commands:
+                            has_existing_evidence = True
+                            skipped_requests.append((action, cmd))
+                            break
+                
+                if not has_existing_evidence:
+                    filtered_requests.append(action)
+            
+            # Log what was skipped
+            if skipped_requests:
+                console.print(f"[dim]Skipping {len(skipped_requests)} request(s) - evidence already exists:[/dim]")
+                for action, cmd in skipped_requests:
+                    console.print(f"[dim]  • {cmd} (already executed)[/dim]")
+            
+            if not filtered_requests:
+                # All evidence requests were for data we already have
+                console.print(f"[yellow]All {len(evidence_requests)} evidence request(s) already satisfied by existing data[/yellow]")
+                console.print(f"[dim]Re-running reasoner with critique feedback instead...[/dim]\n")
+                
+                result = reasoner.reason(state)
+                current_round = state.get('critique_round', 0)
+                result['critique_round'] = current_round + 1
+                result['critique_triggered_investigation'] = False
+                return result
+            
+            # Only create investigation tasks for missing evidence
+            console.print(f"[yellow]⚠ Critic identified {len(filtered_requests)} evidence gap(s) requiring investigation[/yellow]")
             console.print(f"[dim]Collecting missing evidence before re-analysis...[/dim]\n")
             
             # Convert critic's suggestions into investigation requests
             investigation_requests = []
-            for action in evidence_requests:
+            for action in filtered_requests:
                 investigation_requests.append({
                     'question': action,
                     'context': 'Critic identified evidence gap',
@@ -861,6 +934,10 @@ def run_analysis(
     
     # Create session directory for this analysis
     from dump_debugger.session import SessionManager
+    from dump_debugger.utils.thread_registry import get_thread_registry
+    
+    # Clear thread registry from any previous session
+    get_thread_registry().clear()
     
     session_manager = SessionManager(base_dir=Path(settings.sessions_base_dir))
     session_dir = session_manager.create_session(dump_path)
@@ -899,6 +976,7 @@ def run_analysis(
             'issue_description': issue_description,
             'dump_type': dump_type,
             'supports_dx': dump_type == 'user',
+            'thread_info': None,  # Will be populated after debugger init
             
             # Session management
             'session_dir': str(session_dir),

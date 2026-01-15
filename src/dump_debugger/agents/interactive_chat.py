@@ -46,6 +46,45 @@ class InteractiveChatAgent:
                 embeddings_client=embeddings_client
             )
     
+    def _build_thread_reference(self, state: AnalysisState) -> str:
+        """Build thread reference section for LLM prompt.
+        
+        Creates a mapping organized by DBG# (debugger thread index) for easy lookup.
+        When users say 'thread 18', they mean DBG# 18 (used in ~18e commands).
+        """
+        thread_info = state.get('thread_info')
+        if not thread_info:
+            return ""
+        
+        threads = thread_info.get('threads', [])
+        if not threads:
+            return ""
+        
+        # Build compact reference table indexed by DBG#
+        lines = [
+            "\n## THREAD REFERENCE (indexed by DBG#)",
+            "CRITICAL: When user says 'thread X', X refers to DBG# (the number in ~Xe commands).",
+            "Example: 'thread 18' means DBG# 18, use ~18e !clrstack to get its stack trace.",
+            "Format: Thread DBG#: Managed ID X, OSID 0xY [special]",
+        ]
+        
+        for t in threads[:50]:  # Limit to 50 threads for prompt size
+            dbg_id = t.get('dbg_id', '')
+            managed_id = t.get('managed_id', '')
+            osid = t.get('osid', '')
+            special = t.get('special', '')
+            
+            if special:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid} ({special})")
+            else:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid}")
+        
+        if len(threads) > 50:
+            lines.append(f"  ... and {len(threads) - 50} more threads")
+        
+        lines.append("")
+        return "\n".join(lines)
+    
     def answer_question(self, state: AnalysisState, user_question: str) -> dict[str, Any]:
         """Answer a user question using existing evidence or new investigation.
         
@@ -200,8 +239,16 @@ class InteractiveChatAgent:
         
         # Use semantic search if available, otherwise keyword matching
         if self.evidence_retriever:
-            console.print("[dim]Using semantic search for evidence...[/dim]")
-            use_embeddings = settings.use_embeddings and self.evidence_retriever.embeddings_client is not None
+            # In local-only mode, always use keyword search (no cloud embeddings)
+            use_embeddings = (
+                settings.use_embeddings 
+                and self.evidence_retriever.embeddings_client is not None
+                and not settings.local_only_mode
+            )
+            if use_embeddings:
+                console.print("[dim]Using semantic search for evidence...[/dim]")
+            else:
+                console.print("[dim]Using keyword search for evidence...[/dim]")
             relevant = self.evidence_retriever.find_relevant_evidence(
                 question=question,
                 evidence_inventory=context['evidence_inventory'],
@@ -285,15 +332,31 @@ class InteractiveChatAgent:
                 evidence_summary += f"- {cmd}\n"
             evidence_summary += "\n"
         
+        # Build thread reference for managed ID → DBG#/OSID mapping
+        thread_reference = self._build_thread_reference(state)
+        
         prompt = f"""You are analyzing a Windows memory dump. A user has asked a follow-up question.
 
 USER'S ORIGINAL ISSUE: {context['issue_description']}
 
 USER'S QUESTION: {question}
-
+{thread_reference}
 {evidence_summary}
 
 TASK: Determine if we have enough information to answer the user's question OBJECTIVELY based on evidence.
+
+CRITICAL - SPECIFIC REQUESTS REQUIRE SPECIFIC EVIDENCE:
+1. If user asks for "thread X stack trace" or "show me thread Y":
+   - Command ~*e !clrstack is NOT sufficient (shows all threads, too much data)
+   - Need SPECIFIC command like ~Xe !clrstack or ~~[osid]e !clrstack
+   - Set has_sufficient_evidence=false and suggest the specific command
+2. If user asks for "object at address 0xXXXX" or "inspect object YYY":
+   - Command !dumpheap -stat is NOT sufficient (just counts, no object details)
+   - Need !do 0xXXXX or !dumpheap -type followed by !do
+   - Set has_sufficient_evidence=false and suggest the inspection command
+3. If user asks "actual" or "specific" data:
+   - Summary evidence is NOT sufficient - need raw detailed output
+   - Set has_sufficient_evidence=false
 
 CRITICAL THINKING REQUIREMENTS:
 1. Check if existing evidence CONTRADICTS the user's claim or question premise
@@ -301,17 +364,19 @@ CRITICAL THINKING REQUIREMENTS:
 3. Do NOT assume the user's statement is correct - validate it against actual data
 4. Look for objective measurements (CPU time, thread counts, memory sizes) that can prove or disprove claims
 5. If evidence conflicts with the user's assumption, set has_sufficient_evidence=false and suggest commands to clarify
+6. NEVER hallucinate data - if you don't have the specific evidence, admit it
 
 Analysis Steps:
 1. What does the existing evidence objectively show?
 2. Does the user's question contain an assumption or claim that needs validation?
 3. Does existing evidence support, contradict, or remain silent on the user's claim?
 4. If contradiction exists, we need MORE investigation to explain the discrepancy
+5. Is the user asking for SPECIFIC data (thread X, object Y) vs GENERAL data (all threads, summary)?
 
 Respond in JSON format:
 {{
     "has_sufficient_evidence": true/false,
-    "reasoning": "Brief explanation - mention any contradictions with user's assumptions",
+    "reasoning": "Brief explanation - mention any contradictions with user's assumptions or specificity gaps",
     "suggested_commands": ["command1", "command2"] // Only if more investigation needed or contradiction found
 }}
 
@@ -319,7 +384,10 @@ CRITICAL - If suggesting commands:
 - Use ONLY pure WinDbg commands - NO PowerShell syntax
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_
 - THREAD-SPECIFIC: Combine thread switch with command (e.g., '~8e !clrstack', NOT '~8s' then '!clrstack')
-- VALID: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk'"""
+- FOR THREAD REQUESTS: Check THREAD REFERENCE above - it's indexed by DBG#
+  Example: User asks "thread 18" → Look up "Thread 18:" in reference → Use ~18e or ~~[osid]e
+  NOTE: "thread 18" means DBG# 18, NOT Managed ID 18
+- VALID: '~8e !clrstack', '~*e !clrstack', '~~[d78]e !clrstack', '!dumpheap -stat', '!syncblk'"""
 
         messages = [
             SystemMessage(content="You are an expert Windows crash dump analyst."),
@@ -535,11 +603,15 @@ CRITICAL - If suggesting commands:
                     unique_addresses = list(dict.fromkeys(addresses))[:5]  # First 5 unique addresses
                     evidence_context += f"   → Contains addresses: {', '.join(unique_addresses)}\n"
         
+        # Build thread reference for managed ID → DBG#/OSID mapping
+        thread_reference = self._build_thread_reference(state)
+        
         prompt = f"""You are a Windows debugger expert analyzing a memory dump. Generate WinDbg/CDB commands to answer this question using PROGRESSIVE OBJECT GRAPH TRAVERSAL.
 
 DUMP TYPE: {dump_type}
 ORIGINAL ISSUE: {context['issue_description']}
 USER QUESTION: {question}
+{thread_reference}
 {evidence_context}
 
 CRITICAL: PROGRESSIVE OBJECT GRAPH TRAVERSAL STRATEGY
@@ -733,12 +805,15 @@ Respond in JSON format:
                         # This preserves beginning (command output) and end (important results)
                         evidence_text += f"   Output (showing 5KB head + 5KB tail of {len(output)} chars):\n{output[:5000]}\n[... {len(output) - 10000} chars omitted ...]\n{output[-5000:]}\n"
         
+        # Build thread reference for user-friendly thread identification
+        thread_reference = self._build_thread_reference(state)
+        
         prompt = f"""You are answering a user's question about a Windows memory dump analysis.
 
 ORIGINAL ISSUE: {context['issue_description']}
 
 USER'S QUESTION: {question}
-
+{thread_reference}
 {evidence_text}
 
 TASK: Provide a clear, objective answer based ONLY on what the evidence shows.

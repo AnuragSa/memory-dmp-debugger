@@ -3,7 +3,8 @@
 import re
 from typing import Any, Dict, List
 
-from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, TaskComplexity
+from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, LLMInvocationError, TaskComplexity
+from dump_debugger.utils.thread_registry import get_thread_registry
 
 
 class CLRStackAnalyzer(BaseAnalyzer):
@@ -70,8 +71,7 @@ class CLRStackAnalyzer(BaseAnalyzer):
         locals_vars = self._parse_local_variables(output)
         
         # Use cloud LLM for deep analysis (complex task)
-        llm = self.get_llm(TaskComplexity.COMPLEX)
-        analysis = self._deep_stack_analysis(llm, frames, exception, locals_vars, output)
+        analysis = self._deep_stack_analysis(frames, exception, locals_vars, output)
         
         # Generate summary
         thread_id = self._extract_thread_id(output)
@@ -139,8 +139,7 @@ class CLRStackAnalyzer(BaseAnalyzer):
                 })
         
         # Use cloud LLM to find patterns across threads
-        llm = self.get_llm(TaskComplexity.COMPLEX)
-        cross_thread_analysis = self._analyze_thread_patterns(llm, thread_analyses, exceptions_found)
+        cross_thread_analysis = self._analyze_thread_patterns(thread_analyses, exceptions_found)
         
         # Generate summary
         summary = (
@@ -253,15 +252,40 @@ class CLRStackAnalyzer(BaseAnalyzer):
         return locals_dict
     
     def _extract_thread_id(self, output: str) -> str:
-        """Extract thread ID from output."""
+        """Extract thread ID from output and return user-friendly display.
+        
+        Extracts the OSID from output and looks up the managed ID from 
+        the thread registry (populated by !threads analyzer).
+        
+        Returns:
+            User-friendly thread identifier (managed ID if available, OSID otherwise)
+        """
         match = re.search(r'OS Thread Id:\s+0x([0-9a-fA-F]+)', output)
         if match:
-            return match.group(1)
+            osid = match.group(1)
+            # Look up managed ID from registry
+            registry = get_thread_registry()
+            info = registry.get_by_osid(osid)
+            if info:
+                return str(info.managed_id)
+            # Fallback to OSID if not in registry
+            return f"OSID 0x{osid}"
         
         match = re.search(r'Thread\s+(\d+)', output)
         if match:
             return match.group(1)
         
+        return "Unknown"
+    
+    def _extract_raw_osid(self, output: str) -> str:
+        """Extract raw OSID from output (for internal use).
+        
+        Returns:
+            Raw OSID hex string, or "Unknown" if not found
+        """
+        match = re.search(r'OS Thread Id:\s+0x([0-9a-fA-F]+)', output)
+        if match:
+            return match.group(1)
         return "Unknown"
     
     def _split_by_thread(self, output: str) -> List[str]:
@@ -278,7 +302,6 @@ class CLRStackAnalyzer(BaseAnalyzer):
     
     def _deep_stack_analysis(
         self,
-        llm: Any,
         frames: List[Dict[str, Any]],
         exception: Dict[str, str] | None,
         locals_vars: Dict[str, str],
@@ -316,7 +339,7 @@ Provide:
 Be concise and technical. Focus on actionable information."""
         
         try:
-            response = llm.invoke(prompt)
+            response = self.invoke_llm_with_fallback(prompt, TaskComplexity.COMPLEX)
             content = response.content.strip()
             
             # Parse LLM response
@@ -330,18 +353,12 @@ Be concise and technical. Focus on actionable information."""
                 "full_analysis": content,
             }
         
-        except Exception:
-            # Fallback if LLM fails
-            return {
-                "summary": "Thread was executing application code.",
-                "root_cause": exception['message'] if exception else None,
-                "insights": ["Stack analysis completed"],
-                "full_analysis": "",
-            }
+        except LLMInvocationError:
+            # Re-raise LLM errors - no silent fallback
+            raise
     
     def _analyze_thread_patterns(
         self,
-        llm: Any,
         thread_analyses: List[Dict[str, Any]],
         exceptions: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
@@ -384,7 +401,7 @@ Identify:
 Be concise."""
         
         try:
-            response = llm.invoke(prompt)
+            response = self.invoke_llm_with_fallback(prompt, TaskComplexity.COMPLEX)
             content = response.content.strip()
             
             lines = content.split('\n')
@@ -396,12 +413,9 @@ Be concise."""
                 "full_analysis": content,
             }
         
-        except Exception:
-            return {
-                "summary": "Thread analysis completed.",
-                "insights": [],
-                "full_analysis": "",
-            }
+        except LLMInvocationError:
+            # Re-raise LLM errors - no silent fallback
+            raise
     
     def _get_example_stacks(self, thread_analyses: List[Dict[str, Any]], exceptions: List[Dict[str, Any]]) -> List[str]:
         """Get example COMPLETE stacks for threads with interesting patterns.

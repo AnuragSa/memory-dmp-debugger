@@ -78,10 +78,18 @@ class DebuggerWrapper:
         # Track current thread context for cache keying
         self._current_thread = None  # Format: "0x1234" or thread index
         
+        # Cached foundational command outputs (captured during initialization)
+        self._cached_threads_output: str | None = None  # !threads output from DAC verification
+        
+        # Session tracking for audit logging
+        self.session_dir = session_dir
+        self.session_id = session_dir.name if session_dir else None
+        
         # Evidence management
         self.evidence_store = None
         self.evidence_analyzer = None
         self.embeddings_client = None
+        self._embeddings_wrapper = None  # Lazy-loaded LangChain embeddings with redaction
         if session_dir:
             from dump_debugger.evidence import EvidenceStore, EvidenceAnalyzer
             from dump_debugger.llm import get_llm
@@ -89,9 +97,11 @@ class DebuggerWrapper:
             self.evidence_store = EvidenceStore(session_dir)
             self.evidence_analyzer = EvidenceAnalyzer(get_llm())
             
-            # Initialize embeddings client if enabled
-            if settings.use_embeddings:
+            # Initialize embeddings client if enabled (disabled in local-only mode)
+            if settings.use_embeddings and not settings.local_only_mode:
                 self.embeddings_client = self._init_embeddings_client()
+            elif settings.local_only_mode:
+                console.print("[dim]🔒 LOCAL-ONLY MODE: Embeddings disabled, using keyword search[/dim]")
 
         if not self.dump_path.exists():
             raise FileNotFoundError(f"Dump file not found: {dump_path}")
@@ -123,6 +133,30 @@ class DebuggerWrapper:
         
         # Start the persistent debugger session
         self._start_session()
+    
+    def _embed_text(self, text: str) -> list[float] | None:
+        """Embed text using redaction-wrapped embeddings.
+        
+        SECURITY: This method ensures all text is redacted before being sent
+        to cloud embedding APIs. Uses the shared redactor with audit logging.
+        
+        Args:
+            text: Text to embed (will be redacted before embedding)
+            
+        Returns:
+            Embedding vector, or None if embeddings are not available
+        """
+        try:
+            # Lazy-load the embeddings wrapper (with redaction for cloud providers)
+            if self._embeddings_wrapper is None:
+                from dump_debugger.llm import get_embeddings
+                self._embeddings_wrapper = get_embeddings(session_id=self.session_id)
+            
+            return self._embeddings_wrapper.embed_query(text)
+        except Exception as e:
+            if self.show_output:
+                console.print(f"[yellow]⚠ Embedding generation failed: {e}[/yellow]")
+            return None
     
     def _init_embeddings_client(self):
         """Initialize embeddings client based on configuration.
@@ -273,8 +307,9 @@ class DebuggerWrapper:
                     console.print(f"[yellow]  Hint: Run 'lmvm clr' or 'lmvm coreclr' in WinDbg to see exact version needed[/yellow]")
                     raise DebuggerError("DAC version mismatch - analysis cannot proceed")
                 elif "ThreadCount" in verify_output or "Thr" in verify_output or "ID" in verify_output:
-                    # !threads command produced output (thread list)
+                    # !threads command produced output (thread list) - cache it for later use
                     console.print("[green]✓ DAC is compatible and working[/green]")
+                    self._cached_threads_output = verify_output
                 else:
                     console.print(f"[yellow]⚠ DAC verification unclear - continuing with caution[/yellow]")
             else:
@@ -417,6 +452,56 @@ class DebuggerWrapper:
                 if self.show_output:
                     console.print("[dim]Debugger session closed[/dim]")
 
+    def get_thread_info(self) -> dict[str, Any] | None:
+        """Get cached thread information from startup.
+        
+        Returns parsed !threads output that was captured during DAC verification.
+        This provides structured thread data without re-executing the command.
+        
+        Returns:
+            Dictionary with thread information:
+            {
+                "threads": [{"managed_id": 1, "dbg_id": 0, "osid": "4d8c", ...}, ...],
+                "stats": {"ThreadCount": 23, "BackgroundThread": 17, ...},
+                "raw_output": "..."
+            }
+            Returns None if !threads wasn't captured or parsing failed.
+        """
+        if not self._cached_threads_output:
+            # Try to run !threads now if not cached
+            console.print("[dim]Running !threads for thread info...[/dim]")
+            try:
+                result = self.execute_command("!threads")
+                output = result.get('output', '')
+                if output and "ThreadCount" in output:
+                    self._cached_threads_output = output
+            except Exception as e:
+                console.print(f"[yellow]⚠ Could not get thread info: {e}[/yellow]")
+                return None
+        
+        if not self._cached_threads_output:
+            return None
+        
+        try:
+            from dump_debugger.analyzers.threads import ThreadsAnalyzer
+            
+            analyzer = ThreadsAnalyzer()
+            analysis = analyzer.analyze("!threads", self._cached_threads_output)
+            
+            if analysis.success:
+                return {
+                    "threads": analysis.structured_data.get("threads", []),
+                    "stats": analysis.structured_data.get("stats", {}),
+                    "notable_threads": analysis.structured_data.get("notable_threads", {}),
+                    "raw_output": self._cached_threads_output,
+                }
+            else:
+                console.print(f"[yellow]⚠ Thread analysis failed: {analysis.error}[/yellow]")
+                return None
+        except Exception as e:
+            console.print(f"[yellow]⚠ Could not parse thread info: {e}[/yellow]")
+            return None
+
     def execute_command(self, command: str, timeout: int | None = None) -> dict[str, Any]:
         """Execute a debugger command in the persistent session and return the result.
         
@@ -436,6 +521,56 @@ class DebuggerWrapper:
             timeout = settings.command_timeout
 
         command_stripped = command.strip()
+        
+        # Check if this is !threads and we have cached output from startup
+        if command_stripped == "!threads" and self._cached_threads_output:
+            # Check if already stored in evidence store
+            if self.evidence_store:
+                cached_evidence_id = self.evidence_store.find_by_command(command_stripped, current_thread=self._current_thread)
+                if cached_evidence_id:
+                    # Already in evidence store, return with evidence_id
+                    if self.show_output:
+                        console.print(f"[dim]✓ Using cached !threads from evidence store[/dim]")
+                    output = self.evidence_store.retrieve_evidence(cached_evidence_id)
+                    return {
+                        "command": command,
+                        "output": output,
+                        "parsed": self._parse_output(command, output),
+                        "success": True,
+                        "error": None,
+                        "cached": True,
+                        "evidence_id": cached_evidence_id
+                    }
+                else:
+                    # Not in evidence store yet, store it now
+                    if self.show_output:
+                        console.print(f"[dim]✓ Using cached !threads from startup (storing in evidence store)[/dim]")
+                    evidence_id = self.evidence_store.store_evidence(
+                        command=command_stripped,
+                        output=self._cached_threads_output,
+                        current_thread=self._current_thread
+                    )
+                    return {
+                        "command": command,
+                        "output": self._cached_threads_output,
+                        "parsed": self._parse_output(command, self._cached_threads_output),
+                        "success": True,
+                        "error": None,
+                        "cached": True,
+                        "evidence_id": evidence_id
+                    }
+            else:
+                # No evidence store, just return cached output
+                if self.show_output:
+                    console.print(f"[dim]✓ Using cached !threads from startup[/dim]")
+                return {
+                    "command": command,
+                    "output": self._cached_threads_output,
+                    "parsed": self._parse_output(command, self._cached_threads_output),
+                    "success": True,
+                    "error": None,
+                    "cached": True
+                }
 
         try:
             # Check cache first - dumps are static, commands return same output
@@ -606,19 +741,12 @@ class DebuggerWrapper:
             # Store result in evidence cache for future reuse
             if success and self.evidence_store and output:
                 # Generate embedding for semantic search (even for small outputs)
+                # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
                 embedding = None
-                if self.embeddings_client and output:
-                    try:
-                        # Use truncated output for embedding (embeddings have token limits)
-                        embedding_text = output[:8000] if len(output) > 8000 else output
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=embedding_text,
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                    except Exception as e:
-                        if self.show_output:
-                            console.print(f"[yellow]⚠ Embedding generation failed: {e}[/yellow]")
+                if (self.embeddings_client or settings.use_embeddings) and output:
+                    # Use truncated output for embedding (embeddings have token limits)
+                    embedding_text = output[:8000] if len(output) > 8000 else output
+                    embedding = self._embed_text(embedding_text)
                 
                 # Store with embedding (analysis added later if needed)
                 evidence_id = self.evidence_store.store_evidence(
@@ -743,23 +871,10 @@ class DebuggerWrapper:
             console.print(f"[dim]Output size {output_size} bytes exceeds threshold ({threshold}), storing externally...[/dim]")
             
             # Generate embedding from summary for better semantic search
+            # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
             embedding = None
-            if self.embeddings_client and analysis.get('summary'):
-                try:
-                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
-                        # Use LangChain embeddings for Ollama
-                        from dump_debugger.llm import get_embeddings
-                        embeddings = get_embeddings()
-                        embedding = embeddings.embed_query(analysis['summary'])
-                    elif settings.embeddings_provider in ["openai", "azure"]:
-                        # Use OpenAI/Azure client
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=analysis['summary'],
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                except Exception as e:
-                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            if (self.embeddings_client or settings.use_embeddings) and analysis.get('summary'):
+                embedding = self._embed_text(analysis['summary'])
             
             # Update existing evidence with analysis or create new if not cached
             if result.get('cached') or existing_evidence_id:
@@ -811,23 +926,10 @@ class DebuggerWrapper:
             }
             
             # Generate embedding from summary for semantic search (even for inline storage)
+            # SECURITY: Uses _embed_text() which applies redaction before cloud API calls
             embedding = None
-            if self.embeddings_client and analysis.get('summary'):
-                try:
-                    if self.embeddings_client == "ollama" or settings.embeddings_provider == "ollama":
-                        # Use LangChain embeddings for Ollama
-                        from dump_debugger.llm import get_embeddings
-                        embeddings = get_embeddings()
-                        embedding = embeddings.embed_query(analysis['summary'])
-                    elif settings.embeddings_provider in ["openai", "azure"]:
-                        # Use OpenAI/Azure client
-                        embedding_response = self.embeddings_client.embeddings.create(
-                            input=analysis['summary'],
-                            model=settings.azure_embeddings_deployment if settings.embeddings_provider == 'azure' else 'text-embedding-3-small'
-                        )
-                        embedding = embedding_response.data[0].embedding
-                except Exception as e:
-                    console.print(f"[yellow]⚠ Failed to generate embedding from summary: {e}[/yellow]")
+            if (self.embeddings_client or settings.use_embeddings) and analysis.get('summary'):
+                embedding = self._embed_text(analysis['summary'])
             
             # Update the database with analysis if evidence was already cached
             if result.get('cached') and result.get('evidence_id'):

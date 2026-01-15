@@ -17,6 +17,44 @@ class ReasonerAgent:
     def __init__(self):
         self.llm = get_llm(temperature=0.2)
     
+    def _build_thread_reference(self, state: AnalysisState) -> str:
+        """Build thread reference section for LLM prompt.
+        
+        Creates a mapping organized by DBG# (debugger thread index) for easy lookup.
+        When users say 'thread 18', they mean DBG# 18 (used in ~18e commands).
+        """
+        thread_info = state.get('thread_info')
+        if not thread_info:
+            return ""
+        
+        threads = thread_info.get('threads', [])
+        if not threads:
+            return ""
+        
+        # Build compact reference table indexed by DBG#
+        lines = [
+            "\nTHREAD REFERENCE (indexed by DBG# - the number used in ~Xe commands):",
+            "When user says 'thread X', X refers to DBG# (e.g., 'thread 18' means ~18e).",
+            "Format: Thread DBG#: Managed ID X, OSID 0xY [special]",
+        ]
+        
+        for t in threads[:50]:  # Limit to 50 threads for prompt size
+            dbg_id = t.get('dbg_id', '')
+            managed_id = t.get('managed_id', '')
+            osid = t.get('osid', '')
+            special = t.get('special', '')
+            
+            if special:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid} ({special})")
+            else:
+                lines.append(f"  Thread {dbg_id}: Managed ID {managed_id}, OSID 0x{osid}")
+        
+        if len(threads) > 50:
+            lines.append(f"  ... and {len(threads) - 50} more threads")
+        
+        lines.append("")
+        return "\n".join(lines)
+    
     def reason(self, state: AnalysisState) -> dict:
         """Analyze all evidence and draw conclusions."""
         # Check if this is re-analysis after critique-triggered investigation
@@ -167,6 +205,9 @@ The user should see only the corrected analysis as if it were written correctly 
 Produce a clean, professional analysis that incorporates all feedback seamlessly.
 """
         
+        # Build thread reference section for user-friendly thread identification
+        thread_reference = self._build_thread_reference(state)
+        
         prompt = f"""You are analyzing a .NET crash dump with expert-level diagnostic capabilities that surpass human analysts. Your goal is to provide DECISIVE, QUANTITATIVE conclusions that connect disparate evidence into causal chains - demonstrating superhuman pattern recognition across multiple data sources.
 
 {critique_section}{analysis_mode_note}
@@ -174,7 +215,7 @@ CONFIRMED HYPOTHESIS: {state.get('current_hypothesis', 'Unknown')}
 
 HYPOTHESIS TESTING HISTORY:
 {tests_text}
-
+{thread_reference}
 EVIDENCE COLLECTED:
 {evidence_text}
 

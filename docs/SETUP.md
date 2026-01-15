@@ -362,7 +362,7 @@ Recommended for enterprise deployments using Claude Sonnet 3.5+ or a model capab
 LLM_PROVIDER=azure
 
 # Azure AI Foundry credentials
-AZURE_OPENAI_ENDPOINT=https://your-project.services.ai.azure.com/models
+AZURE_OPENAI_ENDPOINT=https://<your-instance>.services.ai.azure.com/models/anthropic/
 AZURE_OPENAI_API_KEY=your-api-key-here
 AZURE_OPENAI_DEPLOYMENT=claude-3-5-sonnet
 AZURE_OPENAI_API_VERSION=2024-10-01-preview
@@ -464,11 +464,10 @@ ollama pull llama3.1:14b   # Larger, better quality
 
 #### Configuration
 
-**Local Only:**
+**Local Only (Ollama for all tasks):**
 ```env
 # .env
 LLM_PROVIDER=ollama
-USE_LOCAL_LLM=true
 LOCAL_LLM_MODEL=qwen2.5-coder:7b
 LOCAL_LLM_BASE_URL=http://localhost:11434
 LOCAL_LLM_TIMEOUT=120
@@ -513,10 +512,10 @@ Routes tasks to appropriate LLM based on complexity:
 
 ```env
 # .env - Tiered Strategy
-USE_LOCAL_LLM=true
+# When USE_TIERED_LLM=true: simple tasks → Ollama, complex tasks → LLM_PROVIDER
+LLM_PROVIDER=azure
 USE_TIERED_LLM=true
 LOCAL_LLM_MODEL=qwen2.5-coder:7b
-CLOUD_LLM_PROVIDER=azure
 
 # Cloud credentials (for complex tasks)
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
@@ -670,11 +669,10 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4
 
 ### Recommended (Tiered + Embeddings)
 ```env
-# Tiered LLM
-USE_LOCAL_LLM=true
+# Tiered LLM (simple → Ollama, complex → Azure)
+LLM_PROVIDER=azure
 USE_TIERED_LLM=true
 LOCAL_LLM_MODEL=qwen2.5-coder:7b
-CLOUD_LLM_PROVIDER=azure
 
 # Azure OpenAI (for complex tasks + embeddings)
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/

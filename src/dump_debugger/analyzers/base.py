@@ -8,9 +8,15 @@ from typing import Any, Dict, List
 from langchain_core.language_models import BaseChatModel
 from rich.console import Console
 
+from dump_debugger.config import settings
 from dump_debugger.llm_router import TaskComplexity, llm_router
 
 console = Console()
+
+
+class LLMInvocationError(Exception):
+    """Raised when LLM invocation fails and no fallback is available."""
+    pass
 
 
 class AnalyzerTier(Enum):
@@ -118,6 +124,67 @@ class BaseAnalyzer(ABC):
             console.print(f"[dim]  → {self.name} analyzer requesting LLM for {complexity.value} task[/dim]")
             self.llm = llm_router.get_llm_for_task(complexity)
         return self.llm
+    
+    def invoke_llm_with_fallback(
+        self,
+        prompt: str | list,
+        complexity: TaskComplexity = TaskComplexity.MODERATE,
+    ) -> Any:
+        """Invoke LLM with proper fallback behavior.
+        
+        Fallback logic:
+        - Local-only mode + local LLM fails → Raise error (user must fix Ollama)
+        - Tiered mode + local LLM fails → Try cloud LLM as fallback
+        - Both fail → Raise error
+        
+        Args:
+            prompt: Prompt string or list of messages to send to LLM
+            complexity: Task complexity for routing
+            
+        Returns:
+            LLM response
+            
+        Raises:
+            LLMInvocationError: If LLM invocation fails with no fallback available
+        """
+        primary_llm = self.get_llm(complexity)
+        
+        try:
+            return primary_llm.invoke(prompt)
+        except Exception as primary_error:
+            # Check if we're in local-only mode - cannot fallback to cloud
+            if settings.local_only_mode:
+                console.print(f"[red]❌ Local LLM failed: {primary_error}[/red]")
+                console.print("[red]   Cannot fallback to cloud in local-only mode.[/red]")
+                raise LLMInvocationError(
+                    f"Local LLM invocation failed: {primary_error}. "
+                    "Check your Ollama configuration (LOCAL_LLM_BASE_URL, LOCAL_LLM_MODEL)."
+                ) from primary_error
+            
+            # Check if we're already using cloud LLM (no point in fallback)
+            is_using_local = llm_router.use_tiered and complexity in [
+                TaskComplexity.SIMPLE, TaskComplexity.MODERATE
+            ]
+            
+            if not is_using_local:
+                # Already using cloud LLM, no fallback available
+                console.print(f"[red]❌ Cloud LLM failed: {primary_error}[/red]")
+                raise LLMInvocationError(
+                    f"Cloud LLM invocation failed: {primary_error}"
+                ) from primary_error
+            
+            # Try cloud LLM as fallback
+            console.print(f"[yellow]⚠️ Local LLM failed: {primary_error}[/yellow]")
+            console.print(f"[yellow]   Falling back to cloud LLM ({settings.llm_provider})...[/yellow]")
+            
+            try:
+                cloud_llm = llm_router.complex_llm
+                return cloud_llm.invoke(prompt)
+            except Exception as cloud_error:
+                console.print(f"[red]❌ Cloud LLM fallback also failed: {cloud_error}[/red]")
+                raise LLMInvocationError(
+                    f"Both local and cloud LLM failed. Local: {primary_error}. Cloud: {cloud_error}"
+                ) from cloud_error
     
     def parse_table(self, output: str, headers: List[str]) -> List[Dict[str, str]]:
         """Parse tabular output into structured data.

@@ -3,7 +3,7 @@
 import re
 from typing import Any, Dict, List
 
-from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, TaskComplexity
+from dump_debugger.analyzers.base import AnalysisResult, AnalyzerTier, BaseAnalyzer, LLMInvocationError, TaskComplexity
 
 
 class DumpHeapAnalyzer(BaseAnalyzer):
@@ -75,8 +75,7 @@ class DumpHeapAnalyzer(BaseAnalyzer):
         top_by_size = sorted(heap_stats, key=lambda x: x["total_size"], reverse=True)[:20]
         
         # Use local LLM to interpret patterns (simple task)
-        llm = self.get_llm(TaskComplexity.SIMPLE)
-        interpretation = self._interpret_heap_patterns(llm, heap_stats, top_by_count, top_by_size)
+        interpretation = self._interpret_heap_patterns(heap_stats, top_by_count, top_by_size)
         
         # Build concise top consumers summary (top 5 only)
         top_5_text = "Top 5 consumers: " + ", ".join(
@@ -261,7 +260,6 @@ class DumpHeapAnalyzer(BaseAnalyzer):
     
     def _interpret_heap_patterns(
         self,
-        llm: Any,
         heap_stats: List[Dict[str, Any]],
         top_by_count: List[Dict[str, Any]],
         top_by_size: List[Dict[str, Any]],
@@ -292,11 +290,11 @@ Top types by size:
 Identify any concerning patterns (memory leaks, excessive allocations, etc.). Be concise."""
         
         try:
-            response = llm.invoke(prompt)
+            response = self.invoke_llm_with_fallback(prompt, TaskComplexity.MODERATE)
             return response.content.strip()
-        except Exception:
-            # Fallback if LLM fails
-            return "Heap analysis complete."
+        except LLMInvocationError:
+            # Re-raise LLM errors - no silent fallback
+            raise
     
     def _format_bytes(self, size: int) -> str:
         """Format byte size for display."""

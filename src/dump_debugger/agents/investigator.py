@@ -64,13 +64,27 @@ STRICT INSTRUCTIONS:
 5. Preserve the exact command syntax mentioned in the task
 6. For ranges like "5-10 objects", use the middle value (e.g., 7 objects)
 
-SPECIAL HANDLING FOR THREAD-SPECIFIC COMMANDS:
-If the task mentions running a command "on sample threads" or "for N threads":
-- First include "!threads" command to list all threads
-- Then for each sample thread, include "~<threadnum>e <command>" (NOT just the command alone)
-- Example: For "!clrstack on 5 sample threads", generate:
-  ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"]
-- Use <thread> as placeholder - we'll replace with actual thread numbers from !threads output
+THREAD COMMAND RULES - CRITICAL:
+When the task mentions examining specific threads (e.g., from !syncblk output):
+1. NEVER use placeholder syntax like ~~[ThreadId] or ~~[thread] - this is INVALID
+2. If you don't have the actual thread IDs, first include "!threads" to get them
+3. Use concrete thread numbers OR use ~*e for all threads
+
+VALID thread command syntax:
+- ~0e !clrstack       (execute on debugger thread 0)
+- ~24e !clrstack      (execute on debugger thread 24) 
+- ~~[d78]e !clrstack  (execute on OSID d78 - MUST be actual hex OSID, NOT a placeholder)
+- ~*e !clrstack       (execute on all threads)
+
+INVALID (NEVER USE):
+- ~~[ThreadId]s; !clrstack   (ThreadId is NOT a valid OSID)
+- ~~[thread]e !clrstack      (thread is NOT a valid OSID)
+- ~~[OWNER_THREAD]e !clrstack (OWNER_THREAD is NOT a valid OSID)
+
+If task says "examine threads waiting on SyncBlock X":
+1. Include "!threads" first to get actual thread IDs
+2. Then use "~*e !clrstack" to get all thread stacks, OR
+3. Use specific thread numbers if you know them from previous evidence
 
 CRITICAL COMMAND SYNTAX RULES:
 - ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
@@ -89,11 +103,14 @@ EXAMPLES:
 Task: "Run '!dumpheap -stat' then '!do' on 3 objects"
 Response: {{"commands": ["!dumpheap -stat", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap -stat followed by !do on 3 objects"}}
 
-Task: "Run '!dumpheap -mt 00007ff8' then '!do' on 5-10 Thread objects"
-Response: {{"commands": ["!dumpheap -mt 00007ff8", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>", "!do <addr>"], "rationale": "executing !dumpheap followed by !do on 7 Thread objects (middle of 5-10 range)"}}
+Task: "Examine all threads waiting on SyncBlock 470 with !clrstack"
+Response: {{"commands": ["~*e !clrstack"], "rationale": "examining all thread stacks to find waiting threads"}}
 
-Task: "Use !threads then !clrstack for 10 sample threads"
-Response: {{"commands": ["!threads", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack", "~<thread>e !clrstack"], "rationale": "getting threads then running clrstack on 10 sample threads"}}
+Task: "Run !clrstack on thread 18 (DBG#) which holds the lock"
+Response: {{"commands": ["~18e !clrstack"], "rationale": "examining specific thread 18 stack"}}
+
+Task: "Execute '!clrstack' on several of the 21 threads waiting on the HostedCompiler lock"  
+Response: {{"commands": ["~*e !clrstack"], "rationale": "examining all thread stacks to identify threads waiting on HostedCompiler lock"}}
 """
         else:
             prompt = f"""You are an expert Windows debugger. Generate ONE precise WinDbg/CDB command for this investigation.
@@ -193,14 +210,17 @@ Example: If !threads shows "DBG=9, ID=12, OSID=3fc", managed thread 12 is at:
 - OSID 0x3fc: Use ~~[3fc]e !clrstack (bracket gets NO 0x prefix, but we refer to it as "OSID 0x3fc")
 
 STRICT COMMAND SELECTION RULES:
-1. If task explicitly mentions a command (e.g., "Use !do", "Run !clrstack"), use that EXACT command
-2. Do NOT substitute with different commands even if they seem more efficient
-3. If task mentions "!do on objects" or "inspect/examine objects with !do":
-   - Use !dumpheap -type TypeName (WITHOUT -stat) to get actual object addresses
-   - DO NOT use -stat flag when addresses are needed for !do inspection
-   - We'll auto-generate !do commands for the addresses found
-4. Use !dumpheap -stat ONLY when task asks for statistics/counts/summaries, never for object inspection
-5. Follow task intent: finding objects for statistics ≠ finding objects for inspection
+1. If task explicitly mentions a command (e.g., "Execute '!do'", "Run !clrstack"), use that EXACT command
+2. Do NOT add prerequisite steps unless the task explicitly says "then" or "followed by"
+3. Task says "Execute '!do' on objects" → Generate: !do <addr> (with placeholder)
+   DO NOT generate: !dumpheap first (that's a separate task)
+4. Task says "Execute '!clrstack' on threads" → Generate: ~*e !clrstack or ~Xe !clrstack
+   DO NOT generate: !threads first (we already have thread info)
+5. If task mentions "actual objects", "specific objects", or "active objects":
+   - Use placeholder syntax: !do <addr> or !gcroot <addr>
+   - The system will auto-resolve <addr> from previous !dumpheap evidence
+6. Use !dumpheap -stat ONLY when task asks for statistics/counts/summaries, never for object inspection
+7. Follow task intent literally - don't be "helpful" by adding steps
 
 CRITICAL COMMAND SYNTAX RULES:
 1. ONLY use WinDbg/CDB/SOS commands - NO PowerShell syntax
@@ -670,21 +690,29 @@ Return ONLY valid JSON in this exact format:
                 # Check for specific WinDbg error patterns, not analyzer commentary
                 output_start = output[:300].strip() if output else ""
                 
-                # Only flag as failed if output looks like an actual debugger error
+                # Check if we got substantial output (indicates success even if some warnings present)
+                has_substantial_output = len(output) > 1000
+                
+                # Only flag as failed if output looks like an actual debugger error AND we don't have substantial output
                 failed = (
                     not success or
-                    output.startswith('Error:') or
-                    output.startswith('0:000> Error') or
-                    'Unable to ' in output_start or  # WinDbg errors start with "Unable to"
-                    'Cannot ' in output_start or     # "Cannot load/find/access"
-                    'Syntax error' in output_start or
-                    'Unknown command' in output_start or
-                    'No export' in output_start or
-                    'does not have a valid' in output_start or  # "does not have a valid class field"
-                    'is not a valid' in output_start or         # "is not a valid object"
-                    'Bad address' in output_start or
-                    (len(output) < 50 and ('error' in output.lower() or 'invalid' in output.lower()))
+                    (not has_substantial_output and (
+                        output.startswith('Error:') or
+                        output.startswith('0:000> Error') or
+                        'Unable to ' in output_start or  # WinDbg errors start with "Unable to"
+                        'Cannot ' in output_start or     # "Cannot load/find/access"
+                        'Syntax error' in output_start or
+                        'Unknown command' in output_start or
+                        'No export' in output_start or
+                        'Bad address' in output_start or
+                        (len(output) < 50 and ('error' in output.lower() or 'invalid' in output.lower()))
+                    ))
                 )
+                
+                # Don't treat object inspection failures as command failures
+                # These are expected when cycling through addresses
+                if 'does not have a valid' in output or 'is not a valid object' in output:
+                    failed = False  # Address is invalid, but command syntax was correct
                 
                 if failed and attempt < max_heal_attempts:
                     # Attempt to heal the command
