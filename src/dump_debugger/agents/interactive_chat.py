@@ -324,11 +324,18 @@ class InteractiveChatAgent:
                     evidence_summary += f"   Finding: {finding[:1000]}\n"
         
         # Add information about already attempted commands
-        attempted_commands = context.get('attempted_commands', [])
+        # Include both explicitly tracked attempts AND commands from gathered evidence
+        attempted_commands = set(context.get('attempted_commands', []))
+        
+        # Also extract commands from evidence to catch commands run in previous iterations
+        for evidence in context.get('relevant_evidence', []):
+            if evidence.get('command'):
+                attempted_commands.add(evidence['command'])
+        
         if attempted_commands:
             evidence_summary += "\n## Commands Already Executed\n"
             evidence_summary += "The following commands have already been run (do NOT suggest these again):\n"
-            for cmd in attempted_commands:
+            for cmd in sorted(attempted_commands):  # Sort for consistency
                 evidence_summary += f"- {cmd}\n"
             evidence_summary += "\n"
         
@@ -653,11 +660,13 @@ AVAILABLE COMMANDS:
 - For native code: k, ~*k, !analyze -v, dt, dv, !locks, !handle
 - For general info: lm, !process, !peb, .lastevent
 
-IMPORTANT: 
-- If previous evidence shows object addresses, use !do <address> to examine those objects
-- Build a SEQUENCE of commands where each step provides input for the next
-- Use placeholder syntax ADDR_FROM_{pattern} when you need to reference addresses from previous output
-  Example: "!do ADDR_FROM_SqlConnection" means "use the address from the SqlConnection output"
+CRITICAL PLACEHOLDER RULES:
+- Use GENERIC PLACEHOLDERS only: <addr>, <thread>, <mt>
+- NEVER use descriptive placeholders like <address_of_SqlConnection> or <connectionString_field_address>
+- The system auto-resolves <addr> from previous command outputs
+- Good: "!do <addr>", "~<thread>e !clrstack"
+- Bad: "!do <address_from_previous>", "!do ADDR_FROM_SqlConnection"
+- Build a SEQUENCE where each step provides addresses for the next step
 
 Generate 3-8 commands that progressively drill down to answer the question.
 
@@ -666,7 +675,7 @@ CRITICAL COMMAND SYNTAX RULES:
 - FORBIDDEN: Pipes (|), foreach, findstr, grep, Where-Object, Select-Object, $_, any PowerShell operators
 - THREAD-SPECIFIC COMMANDS: Always combine thread switch with command (e.g., '~8e !clrstack', NOT '~8s' then '!clrstack')
 - INVALID EXAMPLES: '~*e !clrstack | findstr Thread', '!dumpheap | foreach', '~8s' followed by '!clrstack'
-- VALID EXAMPLES: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk', '!do 0x12345'
+- VALID EXAMPLES: '~8e !clrstack', '~*e !clrstack', '~10e !dso', '!dumpheap -stat', '!syncblk', '!do 0x12345', '!do <addr>'
 - For filtering: Use WinDbg native commands only (e.g., ~*e applies to all threads)
 - For batch: Suggest single representative commands, not loops
 

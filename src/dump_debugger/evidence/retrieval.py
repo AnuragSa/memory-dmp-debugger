@@ -86,7 +86,7 @@ class EvidenceRetriever:
         Returns:
             Top K most relevant evidence pieces
         """
-        console.print(f"[dim]Using semantic search across {len(all_evidence)} evidence pieces...[/dim]")
+        console.print(f"[dim]Using hybrid semantic + keyword search across {len(all_evidence)} evidence pieces...[/dim]")
         
         # Generate embedding for question
         question_embedding = self._get_embedding(question)
@@ -94,24 +94,46 @@ class EvidenceRetriever:
             console.print("[yellow]Failed to generate question embedding, falling back to keyword search[/yellow]")
             return self._keyword_search(question, all_evidence, top_k)
         
-        # Compute similarities
-        similarities = []
+        # Extract keywords for hybrid scoring
+        keywords = self._extract_keywords(question)
+        
+        # Compute hybrid scores (semantic + keyword)
+        scored_evidence = []
         for evidence in all_evidence:
             # Get or generate evidence embedding
             evidence_embedding = self._get_evidence_embedding(evidence)
             
             if evidence_embedding is not None:
-                # Cosine similarity
-                similarity = self._cosine_similarity(question_embedding, evidence_embedding)
-                similarities.append((similarity, evidence))
+                # Semantic similarity (cosine similarity)
+                semantic_score = self._cosine_similarity(question_embedding, evidence_embedding)
+                
+                # Keyword matching score (normalized 0-1)
+                evidence_text = f"{evidence.get('command', '')} {evidence.get('summary', '')}"
+                keyword_score = self._keyword_score(evidence_text, keywords)
+                # Normalize keyword score to 0-1 range (assume max 10 keyword matches)
+                keyword_score_normalized = min(keyword_score / 10.0, 1.0)
+                
+                # Hybrid score: 70% semantic, 30% keyword (keyword helps with exact technical terms)
+                hybrid_score = (0.7 * semantic_score) + (0.3 * keyword_score_normalized)
+                
+                scored_evidence.append((hybrid_score, semantic_score, keyword_score_normalized, evidence))
         
-        # Sort by similarity and return top K
-        similarities.sort(reverse=True, key=lambda x: x[0])
+        # Sort by hybrid score
+        scored_evidence.sort(reverse=True, key=lambda x: x[0])
         
-        if similarities:
-            console.print(f"[dim]Top match: {similarities[0][1]['command']} (score: {similarities[0][0]:.2f})[/dim]")
+        if scored_evidence:
+            top = scored_evidence[0]
+            console.print(f"[dim]Top match: {top[3]['command']} (hybrid: {top[0]:.2f}, semantic: {top[1]:.2f}, keyword: {top[2]:.2f})[/dim]")
         
-        return [evidence for _, evidence in similarities[:top_k]]
+        # Get top candidates for LLM reranking (retrieve more than needed for better reranking)
+        top_candidates = [evidence for _, _, _, evidence in scored_evidence[:min(20, len(scored_evidence))]]
+        
+        # Use LLM reranking to get final top_k (better precision than pure similarity)
+        if len(top_candidates) > top_k:
+            console.print(f"[dim]LLM reranking top {len(top_candidates)} candidates to {top_k} most relevant...[/dim]")
+            return self._llm_rerank(question, top_candidates, top_k)
+        
+        return top_candidates[:top_k]
     
     def _keyword_search(
         self,
@@ -207,8 +229,26 @@ class EvidenceRetriever:
                 except:
                     pass
         
-        # Generate embedding for evidence summary
-        summary_text = f"{evidence.get('command', '')}: {evidence.get('summary', '')}"
+        # Generate embedding for evidence summary with enriched context
+        # Include command, investigation context, summary, and key findings for better semantic matching
+        parts = []
+        
+        if evidence.get('command'):
+            parts.append(f"Command: {evidence['command']}")
+        
+        if evidence.get('investigation_task'):
+            parts.append(f"Context: {evidence['investigation_task']}")
+        
+        if evidence.get('summary'):
+            parts.append(f"Summary: {evidence['summary']}")
+        
+        # Include top 5 key findings for richer semantic content
+        key_findings = evidence.get('structured_data', {}).get('key_findings', [])
+        if key_findings:
+            findings_text = ', '.join([f['finding'] for f in key_findings[:5]])
+            parts.append(f"Key Findings: {findings_text}")
+        
+        summary_text = '\n'.join(parts) if parts else evidence.get('command', '')
         return self._get_embedding(summary_text)
     
     def _cosine_similarity(self, vec1: list[float], vec2: list[float]) -> float:
@@ -283,21 +323,33 @@ class EvidenceRetriever:
         Returns:
             Reranked evidence pieces
         """
-        summaries = "\n".join([
-            f"{i}. [{c.get('command', 'N/A')}] {c.get('summary', 'No summary')[:150]}"
-            for i, c in enumerate(candidates)
-        ])
+        # Build richer summaries for LLM reranking
+        summaries = []
+        for i, c in enumerate(candidates):
+            cmd = c.get('command', 'N/A')
+            summary = c.get('summary', 'No summary')[:150]
+            # Include key finding if available for better context
+            key_findings = c.get('structured_data', {}).get('key_findings', [])
+            finding = f" | Key: {key_findings[0]['finding'][:100]}" if key_findings else ""
+            summaries.append(f"{i}. [{cmd}] {summary}{finding}")
         
-        prompt = f"""Question: {question}
+        summaries_text = "\n".join(summaries)
+        
+        prompt = f"""You are analyzing a Windows crash dump. The user asked: "{question}"
+
+Rank these evidence pieces by relevance to answering the question. Consider:
+- Does it directly answer the question?
+- Does it provide supporting evidence?
+- Is it technically relevant to the issue?
 
 Evidence candidates:
-{summaries}
+{summaries_text}
 
-Return the indices of the {top_k} MOST relevant pieces in order of relevance.
-JSON: {{"indices": [3, 0, 7, ...]}}"""
+Return the indices of the top {top_k} MOST relevant pieces in ORDER of relevance (most relevant first).
+Return ONLY valid JSON: {{"indices": [3, 0, 7, ...]}}"""
 
         messages = [
-            SystemMessage(content="You are an expert at identifying relevant technical evidence."),
+            SystemMessage(content="You are an expert at identifying relevant technical evidence in crash dump analysis. Return only valid JSON."),
             HumanMessage(content=prompt)
         ]
         
@@ -305,10 +357,13 @@ JSON: {{"indices": [3, 0, 7, ...]}}"""
             response = self.llm.invoke(messages)
             result = self._extract_json(response.content)
             if result and 'indices' in result:
-                indices = result['indices']
-                return [candidates[i] for i in indices if i < len(candidates)]
-        except:
-            pass
+                indices = result['indices'][:top_k]  # Ensure we don't exceed top_k
+                # Validate indices and return valid candidates
+                valid_candidates = [candidates[i] for i in indices if isinstance(i, int) and 0 <= i < len(candidates)]
+                if valid_candidates:
+                    return valid_candidates
+        except Exception as e:
+            console.print(f"[dim yellow]⚠ LLM reranking failed ({e}), using similarity order[/dim yellow]")
         
         # Fallback: return candidates as-is
         return candidates[:top_k]

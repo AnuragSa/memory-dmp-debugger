@@ -9,6 +9,7 @@ from dump_debugger.core import DebuggerWrapper
 from dump_debugger.llm import get_llm
 from dump_debugger.state import AnalysisState, Evidence
 from dump_debugger.utils.command_healer import CommandHealer
+from dump_debugger.utils.smart_placeholder_resolver import SmartPlaceholderResolver, detect_placeholders
 
 console = Console()
 
@@ -20,6 +21,8 @@ class InvestigatorAgent:
         self.debugger = debugger
         self.llm = get_llm(temperature=0.1)
         self.healer = CommandHealer()
+        # Use low temperature for precise placeholder validation and resolution
+        self.smart_resolver = SmartPlaceholderResolver(get_llm(temperature=0.0))
     
     def investigate_task(self, state: AnalysisState) -> dict:
         """Execute investigation task and collect evidence using expert-level approach."""
@@ -410,36 +413,48 @@ Return ONLY valid JSON in this exact format:
                     console.print(f"  [yellow]⚠ Skipping command with unresolved <thread> placeholder[/yellow]")
                     continue
             
-            # Check for other placeholders (addresses, etc.) and try to resolve them
+            # Check for other placeholders and use smart LLM-based resolution
             if detect_placeholders(command):
                 console.print(f"  [yellow]⚠ Detected placeholders in:[/yellow] {command}")
                 
-                # Try to resolve, cycling through available addresses and skipping used/invalid ones
-                resolved_command, success, message = resolve_command_placeholders(
-                    command, 
+                # Use unified smart resolver (validates AND resolves in one pass)
+                resolved_command, success, message, details = self.smart_resolver.resolve_command(
+                    command,
                     evidence_for_resolution,
                     used_addresses=used_addresses,
                     invalid_addresses=invalid_addresses
                 )
                 
-                if success:
-                    console.print(f"  [green]✓ Resolved to:[/green] {resolved_command}")
-                    # Track which address was used (normalize to 16-digit format)
-                    addr_match = re.search(r'(?:0x)?[0-9a-f]{8,16}', resolved_command, re.IGNORECASE)
-                    if addr_match:
-                        used_addr = addr_match.group(0)
-                        if not used_addr.startswith('0x'):
-                            used_addr = '0x' + used_addr
-                        # Normalize: pad to 16 hex digits for consistent tracking
-                        if len(used_addr) < 18:  # 0x + 16 digits
-                            used_addr = '0x' + used_addr[2:].zfill(16)
-                        used_addresses.add(used_addr)
-                    command = resolved_command
-                else:
-                    console.print(f"  [red]✗ {message}[/red]")
-                    console.print(f"  [yellow]⚠ Skipping command with unresolved placeholders[/yellow]")
-                    # Skip this command entirely
+                if not success:
+                    # Could not resolve placeholders
+                    console.print(f"  [red]✗ Resolution failed:[/red] {message}")
+                    
+                    # Show details from LLM analysis
+                    if details.get('analysis', {}).get('placeholders'):
+                        for ph in details['analysis']['placeholders']:
+                            if not ph.get('resolvable', False):
+                                console.print(f"    • {ph['text']}: {ph.get('reason', 'unknown')}")
+                                if ph.get('prerequisite'):
+                                    console.print(f"      [dim]Prerequisite: {ph['prerequisite']}[/dim]")
+                    
+                    console.print(f"  [yellow]⚠ Skipping command with unresolvable placeholders[/yellow]")
                     continue
+                
+                # Successfully resolved
+                console.print(f"  [green]✓ Resolved to:[/green] {resolved_command}")
+                
+                # Track which addresses were used from the replacements
+                if details.get('replacements'):
+                    for placeholder, value in details['replacements'].items():
+                        # Track addresses for deduplication
+                        if re.match(r'0x[0-9a-f]+', value, re.IGNORECASE):
+                            # Normalize to 16-digit format
+                            addr = value if value.startswith('0x') else '0x' + value
+                            if len(addr) < 18:  # 0x + 16 digits
+                                addr = '0x' + addr[2:].zfill(16)
+                            used_addresses.add(addr)
+                
+                command = resolved_command
             
             if len(commands_to_execute) > 1:
                 console.print(f"  [dim]→ Step {i+1}/{len(commands_to_execute)}: {command}[/dim]")

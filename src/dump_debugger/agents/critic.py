@@ -204,14 +204,24 @@ Return JSON only:
         {{"type": "architectural|evidence_gap|contradiction|alternative", "description": "Specific issue"}},
         ...
     ],
-    "suggested_actions": [
-        "Specific command or revision needed",
+    "evidence_gaps": [
+        {{
+            "gap": "Description of missing evidence",
+            "commands": ["!command1", "!command2"],
+            "why": "Reason this evidence is needed"
+        }},
         ...
     ],
     "severity": "high|medium|low"
 }}
 
-If no critical issues: {{"issues_found": false, "critical_issues": [], "suggested_actions": [], "severity": "low"}}
+IMPORTANT for evidence_gaps:
+- List gaps in priority order (most critical first)
+- Within each gap, list commands in execution order (e.g., overview before specific queries)
+- Use exact debugger command syntax (e.g., "!threads", "!dumpheap -stat")
+- Only include gaps that require NEW evidence collection
+
+If no critical issues: {{"issues_found": false, "critical_issues": [], "evidence_gaps": [], "severity": "low"}}
 """
         
         try:
@@ -240,10 +250,13 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
                         description = issue.get('description', '')
                         console.print(f"  • [{issue_type}] {description}")
                     
-                    if result.get('suggested_actions'):
-                        console.print("[dim]Suggested actions:[/dim]")
-                        for action in result['suggested_actions']:
-                            console.print(f"    - {action}")
+                    if result.get('evidence_gaps'):
+                        console.print("[dim]Evidence gaps identified:[/dim]")
+                        for gap_info in result['evidence_gaps']:
+                            gap_desc = gap_info.get('gap', 'Unknown gap')
+                            commands = gap_info.get('commands', [])
+                            console.print(f"    - {gap_desc}")
+                            console.print(f"      Commands: {', '.join(commands)}")
                 else:
                     console.print("[green]✓ No critical issues found[/green]")
             elif current_round == 2:
@@ -277,7 +290,7 @@ If no critical issues: {{"issues_found": false, "critical_issues": [], "suggeste
             current_round = state.get('critique_round', 0) + 1
             return {
                 'critique_round': current_round,
-                'critique_result': {'issues_found': False, 'critical_issues': [], 'suggested_actions': []},
+                'critique_result': {'issues_found': False, 'critical_issues': [], 'evidence_gaps': []},
                 'has_unresolved_issues': False
             }
     

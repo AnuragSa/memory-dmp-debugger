@@ -404,28 +404,17 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         """
         critique_result = state.get('critique_result', {})
         issues = critique_result.get('critical_issues', [])
-        suggested_actions = critique_result.get('suggested_actions', [])
+        evidence_gaps = critique_result.get('evidence_gaps', [])
         
         console.print(f"\n[bold cyan]📝 Responding to Round 1 Critique[/bold cyan]")
         
-        # Check if critic is requesting new evidence collection
-        # Look for action items that mention debugger commands
-        evidence_requests = []
-        command_keywords = ['!', 'execute', 'run', 'show actual', 'display', 'collect', 'gather']
-        
-        for action in suggested_actions:
-            action_lower = action.lower()
-            # Check if this is a request for new evidence (mentions commands)
-            if any(keyword in action_lower for keyword in command_keywords):
-                evidence_requests.append(action)
-        
-        if evidence_requests:
-            # Critic identified evidence gaps - need to collect more data
+        if evidence_gaps:
+            # Critic identified structured evidence gaps - need to collect more data
             # Filter out requests for evidence we already have
             evidence_inventory = state.get('evidence_inventory', {})
             commands_executed = state.get('commands_executed', [])
             
-            # Build set of commands we've already run
+            # Build set of commands we've already run (normalized)
             executed_commands = set()
             for cmd in commands_executed:
                 # Normalize command (remove thread prefixes, whitespace)
@@ -437,37 +426,42 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
                         normalized = parts[1].strip()
                 executed_commands.add(normalized)
             
-            # Filter evidence requests
-            filtered_requests = []
-            skipped_requests = []
-            for action in evidence_requests:
-                action_lower = action.lower()
-                # Extract command from request text (look for !command patterns)
-                has_existing_evidence = False
+            # Filter evidence gaps based on whether commands were already executed
+            filtered_gaps = []
+            skipped_gaps = []
+            
+            for gap_info in evidence_gaps:
+                gap_desc = gap_info.get('gap', 'Unknown gap')
+                commands = gap_info.get('commands', [])
+                why = gap_info.get('why', '')
                 
-                # Check for common commands in the request
-                common_commands = ['!threadpool', '!threads', '!eeheap', '!dumpheap', '!syncblk', '!clrstack']
-                for cmd in common_commands:
-                    if cmd in action_lower:
-                        # Check if we've executed this command
-                        cmd_normalized = cmd.strip().lower()
-                        if cmd_normalized in executed_commands:
-                            has_existing_evidence = True
-                            skipped_requests.append((action, cmd))
-                            break
+                # Check if any command in this gap needs to be executed
+                needed_commands = []
+                for cmd in commands:
+                    cmd_normalized = cmd.strip().lower()
+                    if cmd_normalized not in executed_commands:
+                        needed_commands.append(cmd)
                 
-                if not has_existing_evidence:
-                    filtered_requests.append(action)
+                if needed_commands:
+                    # At least some commands in this gap haven't been executed
+                    filtered_gaps.append({
+                        'gap': gap_desc,
+                        'commands': needed_commands,  # Only include commands we need
+                        'why': why
+                    })
+                else:
+                    # All commands already executed
+                    skipped_gaps.append((gap_desc, commands))
             
             # Log what was skipped
-            if skipped_requests:
-                console.print(f"[dim]Skipping {len(skipped_requests)} request(s) - evidence already exists:[/dim]")
-                for action, cmd in skipped_requests:
-                    console.print(f"[dim]  • {cmd} (already executed)[/dim]")
+            if skipped_gaps:
+                console.print(f"[dim]Skipping {len(skipped_gaps)} gap(s) - evidence already exists:[/dim]")
+                for gap_desc, commands in skipped_gaps:
+                    console.print(f"[dim]  • {gap_desc} ({', '.join(commands)} already executed)[/dim]")
             
-            if not filtered_requests:
+            if not filtered_gaps:
                 # All evidence requests were for data we already have
-                console.print(f"[yellow]All {len(evidence_requests)} evidence request(s) already satisfied by existing data[/yellow]")
+                console.print(f"[yellow]All {len(evidence_gaps)} evidence gap(s) already satisfied by existing data[/yellow]")
                 console.print(f"[dim]Re-running reasoner with critique feedback instead...[/dim]\n")
                 
                 result = reasoner.reason(state)
@@ -476,17 +470,51 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
                 result['critique_triggered_investigation'] = False
                 return result
             
-            # Only create investigation tasks for missing evidence
-            console.print(f"[yellow]⚠ Critic identified {len(filtered_requests)} evidence gap(s) requiring investigation[/yellow]")
+            # Deduplicate commands across all gaps to avoid redundant execution
+            # Build a mapping of command -> list of gaps that need it
+            command_to_gaps = {}
+            for gap_info in filtered_gaps:
+                gap_desc = gap_info.get('gap', 'Unknown gap')
+                commands = gap_info.get('commands', [])
+                why = gap_info.get('why', '')
+                
+                for cmd in commands:
+                    cmd_normalized = cmd.strip().lower()
+                    if cmd_normalized not in command_to_gaps:
+                        command_to_gaps[cmd_normalized] = []
+                    command_to_gaps[cmd_normalized].append({
+                        'gap': gap_desc,
+                        'why': why,
+                        'command_original': cmd
+                    })
+            
+            # Convert to investigation requests (one per unique command)
+            console.print(f"[yellow]⚠ Critic identified {len(filtered_gaps)} evidence gap(s) requiring {len(command_to_gaps)} unique command(s)[/yellow]")
             console.print(f"[dim]Collecting missing evidence before re-analysis...[/dim]\n")
             
-            # Convert critic's suggestions into investigation requests
             investigation_requests = []
-            for action in filtered_requests:
+            for cmd_normalized, gap_contexts in command_to_gaps.items():
+                # Use the original command from the first gap
+                cmd_original = gap_contexts[0]['command_original']
+                
+                # Build context from all gaps that need this command
+                if len(gap_contexts) == 1:
+                    # Single gap needs this command
+                    gap_desc = gap_contexts[0]['gap']
+                    why = gap_contexts[0]['why']
+                    question = f"{gap_desc}. {why}" if why else gap_desc
+                else:
+                    # Multiple gaps need this command - consolidate
+                    gap_list = ', '.join(f"({g['gap']})" for g in gap_contexts[:2])
+                    if len(gap_contexts) > 2:
+                        gap_list += f" and {len(gap_contexts) - 2} more"
+                    question = f"Multiple evidence gaps require this command: {gap_list}"
+                
                 investigation_requests.append({
-                    'question': action,
+                    'question': question,
                     'context': 'Critic identified evidence gap',
-                    'approach': action
+                    'approach': f"Execute: {cmd_original}",
+                    'commands': [cmd_original]  # Single command per request
                 })
             
             # Set flags to route to investigation
@@ -515,6 +543,12 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         """Prepare state for deeper investigation based on reasoner's gap requests."""
         investigation_requests = state.get('investigation_requests', [])
         is_from_critic = state.get('critique_triggered_investigation', False)
+        
+        # Limit tasks from critique to prevent runaway investigation
+        max_critique_tasks = 20
+        if is_from_critic and len(investigation_requests) > max_critique_tasks:
+            # Silently limit to first N tasks (already ordered by importance in critic)
+            investigation_requests = investigation_requests[:max_critique_tasks]
         
         if is_from_critic:
             console.print(f"\n[bold cyan]🔍 Setting Up Evidence Collection[/bold cyan]")
@@ -681,10 +715,14 @@ def create_expert_workflow(dump_path: Path, session_dir: Path) -> StateGraph:
         current_task = state.get('current_task', '')
         completed = state.get('completed_tasks', [])
         
-        # Check iteration limit
-        if state.get('iteration', 0) >= state.get('max_iterations', 100):
-            console.print("[yellow]⚠ Max iterations reached, moving to reasoning[/yellow]")
-            return "reason"
+        # Check iteration limit ONLY for normal investigation (not critique-triggered)
+        # Critique-triggered investigation is already limited at task generation time
+        is_critique_triggered = state.get('critique_triggered_investigation', False)
+        
+        if not is_critique_triggered:
+            if state.get('iteration', 0) >= state.get('max_iterations', 100):
+                console.print("[yellow]⚠ Max iterations reached, moving to reasoning[/yellow]")
+                return "reason"
         
         # Check if current task was already in completed list (shouldn't happen now)
         # This is just a safety check since investigate_node handles completion
