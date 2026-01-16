@@ -83,8 +83,10 @@ class AnalysisState(TypedDict):
     max_iterations: int
     
     # Reasoning phase
-    reasoner_analysis: str  # Holistic analysis across all evidence
-    conclusions: list[str]  # Key conclusions drawn
+    analysis_summary: str  # Direct answer to user's question (1-3 sentences)
+    key_findings: list[str]  # 3-5 supporting facts/evidence
+    reasoner_analysis: str  # Detailed numbered analysis
+    conclusions: list[str]  # Key conclusions (deprecated, use key_findings)
     confidence_level: Literal["high", "medium", "low"] | None
     reasoning_iterations: int  # Number of times reasoning has been performed
     needs_deeper_investigation: bool  # Whether reasoner identified gaps requiring more investigation
@@ -92,7 +94,7 @@ class AnalysisState(TypedDict):
     
     # Critique phase (NEW - quality review)
     critique_round: int  # Current critique iteration (0-based)
-    critique_result: dict[str, Any]  # Critic's findings {issues_found, critical_issues, suggested_actions, severity}
+    critique_result: dict[str, Any]  # Critic's findings {issues_found, critical_issues, evidence_gaps, severity}
     has_unresolved_issues: bool  # Whether issues remain after max rounds
     needs_evidence_collection: bool  # Whether critic identified evidence gaps requiring investigation
     critique_triggered_investigation: bool  # Whether current investigation was triggered by critique feedback

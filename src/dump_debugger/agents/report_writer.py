@@ -117,23 +117,24 @@ class ReportWriterAgentV2:
         console.print(f"[bold green]ANALYSIS COMPLETE[/bold green]")
         console.print(f"[bold green]═══════════════════════════════════════════════════[/bold green]\n")
         
-        # Display comprehensive findings
-        issue = state.get('issue_description', 'Unknown')
-        hypothesis = state.get('current_hypothesis', 'Unknown')
+        # Get structured analysis
+        summary = state.get('analysis_summary', '')
+        key_findings = state.get('key_findings', [])
+        detailed_analysis = state.get('reasoner_analysis', '')
         confidence = state.get('confidence_level', 'medium')
-        conclusions = state.get('conclusions', [])
-        analysis = state.get('reasoner_analysis', '')
         hypothesis_tests = state.get('hypothesis_tests', [])
+        issue = state.get('issue_description', 'Unknown')
         
-        # Issue
+        # Display original issue
         console.print(f"[bold cyan]Original Issue:[/bold cyan] {issue}\n")
         
-        # Final Hypothesis
-        console.print(f"[bold cyan]Final Hypothesis:[/bold cyan]")
-        console.print(f"{hypothesis}")
-        console.print(f"[bold cyan]Confidence:[/bold cyan] {confidence.upper()}\n")
+        # Display SUMMARY (direct answer)
+        if summary:
+            console.print(f"[bold yellow]SUMMARY:[/bold yellow]")
+            console.print(f"{summary}")
+            console.print(f"[dim]Confidence: {confidence.upper()}[/dim]\n")
         
-        # Hypothesis Testing History
+        # Display hypothesis testing history (collapsed)
         if hypothesis_tests:
             console.print(f"[bold cyan]Hypothesis Testing Process:[/bold cyan]")
             for i, test in enumerate(hypothesis_tests, 1):
@@ -144,27 +145,23 @@ class ReportWriterAgentV2:
                 if result == 'confirmed':
                     console.print(f"  {i}. [green]{hyp} → {result_str}[/green]")
                 elif result == 'rejected':
-                    console.print(f"  {i}. [red]{hyp} → {result_str}[/red]")
+                    console.print(f"  {i}. [dim]{hyp} → {result_str}[/dim]")
                 else:
                     console.print(f"  {i}. [yellow]{hyp} → {result_str}[/yellow]")
-                
-                reasoning = test.get('evaluation_reasoning', '')
-                if reasoning:
-                    console.print(f"     [dim]{reasoning[:300]}[/dim]")
             console.print()
         
-        # Key Conclusions
-        if conclusions:
-            console.print("[bold cyan]Key Conclusions:[/bold cyan]")
-            for i, conclusion in enumerate(conclusions, 1):
-                console.print(f"  {i}. {conclusion}")
+        # Display KEY FINDINGS (supporting evidence)
+        if key_findings:
+            console.print("[bold cyan]Key Findings:[/bold cyan]")
+            for i, finding in enumerate(key_findings, 1):
+                console.print(f"  {i}. {finding}")
             console.print()
         
-        # Detailed Analysis
-        if analysis:
+        # Display DETAILED ANALYSIS
+        if detailed_analysis:
             console.print("[bold cyan]Detailed Analysis:[/bold cyan]")
-            # Format analysis with bullet points for readability
-            formatted_analysis = self._format_analysis_text(analysis)
+            # Format analysis with proper structure
+            formatted_analysis = self._format_analysis_text(detailed_analysis)
             console.print(formatted_analysis)
             console.print()
         

@@ -143,24 +143,49 @@ class ReasonerAgent:
         analysis_mode_note = ""
         if all_rejected:
             analysis_mode_note = """
-⚠️ ANALYSIS MODE: SYNTHESIS FROM EVIDENCE
-All tested hypotheses were ruled out by evidence. Your task now is to synthesize what the evidence DOES show,
-rather than focusing on what was ruled out. Users need to see positive findings, not just rejections.
+⚠️ ANALYSIS MODE: NO HYPOTHESIS CONFIRMED
+All tested hypotheses were rejected by the evidence. This is a VALID OUTCOME - not every issue has evidence in the dump.
 
 CRITICAL INSTRUCTIONS FOR REJECTED HYPOTHESES:
-1. Start with "WHAT WE LEARNED FROM EVIDENCE" not "why hypothesis was wrong"
-2. Focus on POSITIVE FINDINGS: What IS happening in the application
-3. Frame conclusions as discoveries: "Evidence shows X" not "Hypothesis about Y was rejected"
-4. Provide actionable next steps based on actual observations
-5. If no root cause found, describe the ACTUAL STATE observed and what it rules out
+1. ANALYZE EVIDENCE OBJECTIVELY: Review all metrics (thread pool, memory, CPU, locks, etc.) without bias
+2. DO NOT manufacture problems: Just because you have data doesn't mean there's a problem
+3. Report observations neutrally using "HEALTHY" / "NORMAL" / "within expected range" when appropriate
+4. If observations ARE concerning, explain WHY with expert assessment backing (severity, expected impact)
+5. Let conclusion emerge from evidence - do NOT start with verdict and work backwards
 
-EXAMPLE OF GOOD FRAMING:
-BAD:  "HYPOTHESIS REJECTED: Thread termination cascade theory disproven by only 2 exceptions vs 30 dead threads"
-GOOD: "ACTUAL STATE: Thread pool maintains healthy 47% idle capacity (28/59 workers), zero queued work, low CPU 0.78%"
-      "FINDING: Application is waiting for work, not experiencing capacity issues"
-      "IMPLICATION: Root cause lies in work scheduling/queueing mechanism, not thread health"
+FOLLOW BOTTOM-UP WORKFLOW:
+Step 1: DETAILED_ANALYSIS - Analyze all evidence objectively (thread pool, memory, CPU, locks, resources)
+Step 2: KEY_FINDINGS - Extract facts: "X idle workers - HEALTHY", "Y% Gen2 free - NORMAL", etc.
+Step 3: SUMMARY - Conclude from findings: If all healthy, say "NO EVIDENCE FOUND"
 
-Your analysis should inspire confidence that the tool understands the system, even when initial theories were wrong.
+EXAMPLE OF CORRECT BOTTOM-UP ANALYSIS:
+User claimed: "Application has performance issues"
+
+DETAILED_ANALYSIS:
+"1. THREAD POOL STATE: !threadpool shows 28 idle workers out of 28 total, 0 work items queued, 6% CPU utilization. This indicates 100% available worker capacity with no queuing or saturation - HEALTHY state.
+
+2. MEMORY STATE: !eeheap shows 1.5GB total heap with Gen2 at 1.2GB. !gcheapstat shows 15% free space in Gen2 across all heaps. This is within normal operational range for .NET applications under steady load - NORMAL.
+
+3. CPU AND ACTIVITY: 6% CPU utilization with 28 idle workers indicates application is waiting for work, not processing work. No signs of computational bottleneck.
+
+4. LOCK CONTENTION: !syncblk shows 0 contested locks, no threads blocked on Monitor.Enter. No synchronization bottlenecks detected.
+
+5. RESOURCE HEALTH: !finalizequeue shows 37K objects pending finalization - within normal range for long-running applications. Finalizer thread is active and processing normally.
+
+All tested hypotheses (thread exhaustion, GC pressure, lock contention) are contradicted by above evidence."
+
+KEY_FINDINGS (extracted from analysis):
+- "Thread pool: 28 idle workers, 0 queue depth - HEALTHY (from point 1)"
+- "Memory: 1.5GB heap, 15% Gen2 free space - NORMAL (from point 2)"
+- "CPU: 6% utilization - not under load (from point 3)"
+- "No lock contention or blocking threads detected (from point 4)"
+
+SUMMARY (conclusion from findings):
+"NO EVIDENCE of performance issues found in this dump. All tested hypotheses were rejected by the evidence. Application metrics indicate healthy operation at time of dump capture."
+
+❌ WRONG (top-down approach):
+Starting with "NO EVIDENCE FOUND" and then cherry-picking metrics to support that verdict.
+Manufacturing problems from observations: "Entity Framework memory leak with 1GB of objects causing GC pressure..."
 """
         
         # Check for critique feedback to address
@@ -169,14 +194,22 @@ Your analysis should inspire confidence that the tool understands the system, ev
         if critique_result.get('issues_found'):
             critique_round = state.get('critique_round', 0)
             critical_issues = critique_result.get('critical_issues', [])
-            suggested_actions = critique_result.get('suggested_actions', [])
+            evidence_gaps = critique_result.get('evidence_gaps', [])
             
             # Sanitize text to prevent JSON parsing issues - replace quotes with smart quotes
             def sanitize_text(text):
-                return text.replace('"', '\"').replace("'", "'")
+                return text.replace('"', '\“').replace("'", "\u2019")
             
             issues_text = "\n".join([f"- [{issue['type']}] {sanitize_text(issue['description'])}" for issue in critical_issues])
-            actions_text = "\n".join([f"- {sanitize_text(action)}" for action in suggested_actions])
+            
+            # Format evidence gaps if present
+            gaps_text = ""
+            if evidence_gaps:
+                gaps_text = "\n\nEVIDENCE GAPS ADDRESSED:\n"
+                for gap_info in evidence_gaps:
+                    gap_desc = gap_info.get('gap', 'Unknown gap')
+                    commands = gap_info.get('commands', [])
+                    gaps_text += f"- {sanitize_text(gap_desc)} (collected via {', '.join(commands)})\n"
             
             critique_section = f"""
 ⚠️ INTERNAL QUALITY REVIEW (Round {critique_round}): Your previous analysis had issues that need correction.
@@ -184,10 +217,7 @@ The following problems were identified - incorporate these corrections into your
 
 ISSUES TO FIX:
 {issues_text}
-
-REQUIRED CORRECTIONS:
-{actions_text}
-
+{gaps_text}
 CRITICAL INSTRUCTIONS:
 1. Silently incorporate all corrections into your analysis
 2. Remove claims not supported by evidence
@@ -330,19 +360,72 @@ Example format:
 CRITICAL: Return ONLY valid JSON. Do NOT use markdown, explanatory text, or formatting.
 Do NOT start your response with # or any other text. Start directly with {{
 
+ANALYSIS WORKFLOW (bottom-up):
+1. ANALYZE EVIDENCE FIRST: Review all evidence objectively, look for patterns, correlations, metrics
+2. EXTRACT KEY FINDINGS: Identify 3-5 most important facts/patterns from your analysis
+3. SYNTHESIZE SUMMARY: Based on findings, write direct answer to user's question
+
+DO NOT write summary first and cherry-pick evidence to support it.
+DO NOT start with conclusion and work backwards.
+START with evidence, END with summary.
+
+REQUIRED OUTPUT STRUCTURE:
+Return three sections in this JSON order (analysis workflow order):
+
+1. DETAILED_ANALYSIS: Numbered analysis of ALL relevant evidence (this is your work)
+2. KEY_FINDINGS: 3-5 bullet points extracted FROM your analysis (this is what you found)
+3. SUMMARY: Direct answer derived FROM your findings (this is your conclusion)
+
+ALIGNMENT RULES:
+- Summary must be logical conclusion from key findings
+- Key findings must be extracted from detailed analysis
+- If analysis shows healthy metrics, findings must say "HEALTHY" and summary must say "NO PROBLEM"
+- If analysis shows root cause, findings must prove it and summary must state it
+- NEVER contradict between any sections
+- Everything must trace back to specific evidence
+
 Return JSON:
+
+IF PROBLEM CONFIRMED:
 {{
-    \"analysis\": \"1. First finding with quantitative data...\\n\\n2. Second finding correlating evidence...\\n\\n3. Root cause with causal chain...\",
-    \"conclusions\": [\"Decisive conclusion 1 with numbers\", \"Conclusion 2 with cross-reference\", \"Conclusion 3 with impact\"],
+    \"detailed_analysis\": \"1. PRIMARY EVIDENCE: [Analyze the main evidence with command outputs and metrics]\\n\\n2. SUPPORTING EVIDENCE: [Analyze corroborating data]\\n\\n3. MECHANISM: [How the problem causes symptoms based on evidence]\\n\\n4. IMPACT: [Quantified effects from evidence]\\n\\n5. ALTERNATIVES RULED OUT: [What evidence contradicts other explanations]\",
+    \"key_findings\": [
+        \"Primary evidence proving root cause (extracted from point 1 above)\",
+        \"Supporting evidence showing mechanism (extracted from point 2-3)\",
+        \"Impact quantification (extracted from point 4)\",
+        \"Alternative causes ruled out (extracted from point 5)\"
+    ],
+    \"summary\": \"ROOT CAUSE IDENTIFIED: [Problem name from findings]. [What's happening from findings]. [Impact from findings].\",
     \"confidence_level\": \"high|medium|low\",
     \"needs_deeper_investigation\": false,
     \"investigation_requests\": []
 }}
 
-OR if critical correlation data needed:
+IF ALL HYPOTHESES REJECTED (no problem found):
 {{
-    \"analysis\": \"...\",
-    \"conclusions\": [\"Strong conclusion with caveat about missing correlation\"],
+    \"detailed_analysis\": \"1. THREAD POOL STATE: [Full analysis from !threadpool evidence]\\n\\n2. MEMORY STATE: [Full analysis from !eeheap evidence]\\n\\n3. CPU AND ACTIVITY: [Analysis of utilization evidence]\\n\\n4. LOCK CONTENTION: [Analysis showing no blocking]\\n\\n5. RESOURCE HEALTH: [Analysis of other health metrics]\\n\\nAll tested hypotheses were rejected by above evidence. Application shows healthy operational state at dump capture time.\",
+    \"key_findings\": [
+        \"Thread pool: X idle workers, 0 queue depth - HEALTHY (from point 1)\",
+        \"Memory: X GB heap, Y% Gen2 free - NORMAL (from point 2)\",
+        \"CPU: X% utilization - not under load (from point 3)\",
+        \"No lock contention or blocking threads detected (from point 4)\"
+    ],
+    \"summary\": \"NO EVIDENCE of [user's reported issue] found in this dump. All tested hypotheses (list them) were rejected by the evidence. Application metrics indicate healthy operation at time of dump capture.\",
+    \"confidence_level\": \"high\",
+    \"needs_deeper_investigation\": false,
+    \"investigation_requests\": []
+}}
+
+IF PROBLEM CONFIRMED BUT INCOMPLETE EVIDENCE:
+{{
+    \"detailed_analysis\": \"1. STRONG EVIDENCE: [Analyze what we found]\\n\\n2. SUPPORTING PATTERNS: [Analyze corroborating data]\\n\\n3. MISSING CORRELATION: [Analyze what specific data we need]\\n\\n4. ALTERNATIVE EXPLANATIONS: [Analyze what else could explain this]\\n\\n5. CONFIDENCE LIMITATION: [Why we can't be certain without missing data]\",
+    \"key_findings\": [
+        \"Strong evidence for root cause (from point 1): [specific metrics]\",
+        \"Supporting pattern observed (from point 2): [data]\",
+        \"Missing correlation (from point 3): [what we need to confirm]\",
+        \"Confidence limited by (from point 5): [specific gap]\"
+    ],
+    \"summary\": \"LIKELY ROOT CAUSE: [Problem name from findings] based on available evidence, but additional correlation needed to confirm [specific missing link from findings].\",
     \"confidence_level\": \"medium\",
     \"needs_deeper_investigation\": true,
     \"investigation_requests\": [
@@ -448,9 +531,16 @@ OR if critical correlation data needed:
                     for i, req in enumerate(investigation_requests, 1):
                         console.print(f"[dim]  {i}. {req.get('question', 'Unknown question')}[/dim]")
             
+            # Extract new structured fields (with fallback to old format for backward compatibility)
+            summary = result.get('summary', '')
+            key_findings = result.get('key_findings', result.get('conclusions', []))
+            detailed_analysis = result.get('detailed_analysis', result.get('analysis', ''))
+            
             return {
-                'reasoner_analysis': result['analysis'],
-                'conclusions': result['conclusions'],
+                'analysis_summary': summary,
+                'key_findings': key_findings,
+                'reasoner_analysis': detailed_analysis,
+                'conclusions': key_findings,  # For backward compatibility
                 'confidence_level': result['confidence_level'],
                 'needs_deeper_investigation': needs_deeper,
                 'investigation_requests': investigation_requests,
